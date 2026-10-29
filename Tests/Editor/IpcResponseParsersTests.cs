@@ -159,6 +159,24 @@ namespace FRGVersionControl.Tests
         }
 
         [Test]
+        public void PropList_StringMap_DecodesEscapesAndKeepsMultiLineValues()
+        {
+            var json = @"{""v"":1,""id"":""u"",""ok"":true,""result"":{""props"":{" +
+                       @"""svn:needs-lock"":""*""," +
+                       @"""svn:ignore"":""Library
+Temp
+""," +
+                       @"""frg:notes"":""say \""hi\"" Bob" + U + @"0027s }]""}}}";
+            var m = IpcResponseParsers.ParseStringMap(json, "props");
+            Assert.AreEqual(3, m.Count);
+            Assert.AreEqual("*", m["svn:needs-lock"]);
+            Assert.AreEqual("Library" + ((char)10) + "Temp" + ((char)10), m["svn:ignore"]);
+            Assert.AreEqual("say \"hi\" Bob's }]", m["frg:notes"]);
+            Assert.IsEmpty(IpcResponseParsers.ParseStringMap(@"{""v"":1,""id"":""u"",""ok"":true,""result"":{""props"":{}}}", "props"));
+            Assert.Catch<System.Exception>(() => IpcResponseParsers.ParseStringMap(@"{""result"":{""props"":{""a"":""b", "props"));
+        }
+
+        [Test]
         public void ChangelistMembership_MissingOrEmpty_IsEmpty_TruncatedThrows()
         {
             Assert.IsEmpty(IpcResponseParsers.ParseChangelistMembership(@"{""v"":1,""id"":""u"",""ok"":true,""result"":{""membership"":{}}}"));

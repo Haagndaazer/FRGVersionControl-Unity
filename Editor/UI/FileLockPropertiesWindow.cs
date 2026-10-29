@@ -1,23 +1,20 @@
+using System;
+using System.Collections.Generic;
 using System.IO;
+using System.Threading.Tasks;
 using UnityEditor;
 using UnityEngine;
+using FRGVersionControl.Core;
+using FRGVersionControl.Core.OverrideMode;
 using FRGVersionControl.Core.Svn;
 
 namespace FRGVersionControl.UI
 {
     /// <summary>
-    /// Phase 4 Step 5: lightweight SVN properties editor.
-    ///
-    /// View / set common SVN properties on a selected asset:
-    /// - svn:needs-lock (checkbox: present or absent)
-    /// - svn:ignore (text area; for folders only)
-    /// - Custom property (one-off key/value)
-    ///
-    /// Read via `svn proplist -v`; write via `svn propset` / `svn propdel`. Both invoke the
-    /// existing SvnCommandRunner.Run pipeline (config-dir + retry + cert flags).
-    ///
-    /// Power-user surface; not on the daily-driver loop. No async wrappers necessary —
-    /// proplist on a single file is fast (&lt; 100ms typical), and the dialog is modal.
+    /// Edit SVN Properties: svn:needs-lock (files), svn:ignore (folders), the other properties on
+    /// the path (read-only) and a one-off custom property, through the core's prop.* ops
+    /// (SVN_CORE_API.md §5.13). IPC runs off the main thread; results are published to the model
+    /// on the main thread, and a result from a superseded operation is dropped.
     /// </summary>
     public class FileLockPropertiesWindow : EditorWindow
     {
@@ -38,119 +35,194 @@ namespace FRGVersionControl.UI
 
         public static void Open(string path)
         {
-            var w = GetWindow<FileLockPropertiesWindow>(true,
-                $"SVN Properties: {Path.GetFileName(path)}");
-            w.minSize = new Vector2(520, 320);
+            var w = GetWindow<FileLockPropertiesWindow>(true, $"SVN Properties: {Path.GetFileName(path)}");
+            w.minSize = new Vector2(520, 360);
             w.Init(path);
             w.Show();
         }
 
-        private string m_Path;
-        private bool m_NeedsLockCurrent;
-        private bool m_NeedsLockNew;
-        private string m_IgnoreCurrent = "";
-        private string m_IgnoreNew = "";
-        private string m_CustomKey = "";
-        private string m_CustomValue = "";
+        [SerializeField] private string m_Path;
+        [SerializeField] private bool m_IsDirectory;
+        [SerializeField] private string m_CustomKey = "";
+        [SerializeField] private string m_CustomValue = "";
+
+        private SvnPropertiesModel m_Model;
         private string m_StatusBanner = "";
-        private bool m_IsDirectory;
+        private bool m_StatusIsError;
+        private bool m_Busy;
+        private int m_Generation;
+        private Vector2 m_OtherScroll;
 
         private void Init(string path)
         {
+            if (m_Model != null && m_Model.Loaded && m_Model.HasPendingChanges && path != m_Path &&
+                !EditorUtility.DisplayDialog("Discard unapplied changes?",
+                    $"You have unapplied property changes on {Path.GetFileName(m_Path)}. Open {Path.GetFileName(path)} and discard them?",
+                    "Discard", "Keep editing"))
+            {
+                return;
+            }
             m_Path = path;
             string fullPath = Path.IsPathRooted(path) ? path : Path.Combine(SvnCommandRunner.ProjectRoot, path);
             m_IsDirectory = Directory.Exists(fullPath);
-            ReloadProperties();
+            titleContent = new GUIContent($"SVN Properties: {Path.GetFileName(path)}");
+            Reload(null);
         }
 
-        private void ReloadProperties()
+        private void OnEnable()
         {
-            // svn:needs-lock — propget; non-zero exit (W200017) means not set
-            var needsLockResult = SvnCommandRunner.Run($"propget svn:needs-lock \"{m_Path}\"");
-            m_NeedsLockCurrent = needsLockResult.success
-                                 && !string.IsNullOrEmpty(needsLockResult.output);
-            m_NeedsLockNew = m_NeedsLockCurrent;
+            if (!string.IsNullOrEmpty(m_Path) && m_Model == null) Reload(null);
+        }
 
-            if (m_IsDirectory)
+        private void Reload(string bannerAfter)
+        {
+            var model = new SvnPropertiesModel(m_Path, m_IsDirectory);
+            var path = m_Path;
+            RunAsync("Loading properties…", () => SvnPropertiesModel.FetchAsync(IpcPropertyOps.Instance, path), fetched =>
             {
-                var ignoreResult = SvnCommandRunner.Run($"propget svn:ignore \"{m_Path}\"");
-                m_IgnoreCurrent = ignoreResult.success ? (ignoreResult.output ?? "") : "";
-                m_IgnoreNew = m_IgnoreCurrent;
-            }
+                model.Publish(fetched);
+                m_Model = model;
+                if (model.LoadError != null) SetBanner("Error reading properties: " + model.LoadError, true);
+                else SetBanner(bannerAfter ?? "", false);
+            });
+        }
+
+        private void RunAsync<T>(string pendingBanner, Func<Task<T>> work, Action<T> onDone)
+        {
+            int generation = ++m_Generation;
+            m_Busy = true;
+            SetBanner(pendingBanner, false);
+            Task.Run(work).ContinueWith(t =>
+            {
+                SvnCommandRunner.s_UnityMainSync.Post(_ =>
+                {
+                    if (this == null || generation != m_Generation) return;
+                    m_Busy = false;
+                    if (t.IsFaulted) SetBanner("Error: " + t.Exception?.GetBaseException().Message + " Click Reload to try again.", true);
+                    else onDone(t.Result);
+                    Repaint();
+                }, null);
+            });
+        }
+
+        private void SetBanner(string text, bool isError)
+        {
+            m_StatusBanner = text ?? "";
+            m_StatusIsError = isError;
+        }
+
+        private bool IsUnderOverride()
+        {
+            var mgr = FileLockOverrideManager.Instance;
+            return mgr != null && mgr.IsInitialized && mgr.IsInOverrideMode(m_Path);
         }
 
         private void OnGUI()
         {
             if (string.IsNullOrEmpty(m_Path))
             {
-                EditorGUILayout.HelpBox("No asset selected.", MessageType.Info);
+                EditorGUILayout.HelpBox("No asset selected. Right-click an asset and choose FRG Version Control > Edit SVN Properties.", MessageType.Info);
                 return;
             }
 
             EditorGUILayout.LabelField($"Path: {m_Path}", EditorStyles.miniLabel);
-            EditorGUILayout.LabelField($"Type: {(m_IsDirectory ? "directory" : "file")}", EditorStyles.miniLabel);
-
+            EditorGUILayout.LabelField($"Type: {(m_IsDirectory ? "folder" : "file")}", EditorStyles.miniLabel);
             EditorGUILayout.Space();
 
-            // svn:needs-lock
-            EditorGUILayout.LabelField("svn:needs-lock", EditorStyles.boldLabel);
-            EditorGUILayout.HelpBox(
-                "When set, the file is read-only on disk by default. `svn lock` makes it writable + " +
-                "registers a server-side lock. Required for the Ignore-on-Commit workflow's safety property. " +
-                "Almost always wanted on binary art assets.",
-                MessageType.None);
-            m_NeedsLockNew = EditorGUILayout.Toggle(
-                new GUIContent("Property set",
-                               "Whether svn:needs-lock=* is currently set on this file."),
-                m_NeedsLockNew);
+            var model = m_Model;
+            bool editable = model != null && model.Loaded && !m_Busy && model.Path == m_Path;
+            bool pending = editable && model.HasPendingChanges;
 
-            EditorGUILayout.Space();
-
-            // svn:ignore (folders only)
-            if (m_IsDirectory)
+            using (new EditorGUI.DisabledScope(!editable))
             {
-                EditorGUILayout.LabelField("svn:ignore", EditorStyles.boldLabel);
-                EditorGUILayout.HelpBox(
-                    "One pattern per line; matches are excluded from `svn status`, `svn add`, etc. " +
-                    "Common entries: Library, Temp, *.tmp, *.user, ~$*",
-                    MessageType.None);
-                m_IgnoreNew = EditorGUILayout.TextArea(m_IgnoreNew, GUILayout.MinHeight(80));
+                if (!m_IsDirectory)
+                {
+                    EditorGUILayout.LabelField(SvnPropertiesModel.NeedsLock, EditorStyles.boldLabel);
+                    EditorGUILayout.HelpBox(
+                        "When set, the file becomes read-only on disk once the change is committed, and stays " +
+                        "read-only until someone locks it, so two people cannot edit it at once. Almost always " +
+                        "wanted on binary art assets.",
+                        MessageType.None);
+                    bool overridden = IsUnderOverride();
+                    using (new EditorGUI.DisabledScope(overridden))
+                    {
+                        bool shown = editable && model.NeedsLockDesired;
+                        EditorGUI.BeginChangeCheck();
+                        bool toggled = EditorGUILayout.Toggle(
+                            new GUIContent("Property set", "Whether svn:needs-lock is set on this file."), shown);
+                        if (EditorGUI.EndChangeCheck() && editable) model.NeedsLockDesired = toggled;
+                    }
+                    if (overridden)
+                    {
+                        EditorGUILayout.HelpBox("svn:needs-lock is managed by the active override on this file. End the override before changing it.", MessageType.Warning);
+                    }
+                    EditorGUILayout.Space();
+                }
+                else
+                {
+                    EditorGUILayout.LabelField(SvnPropertiesModel.Ignore, EditorStyles.boldLabel);
+                    EditorGUILayout.HelpBox(
+                        "One pattern per line. Matching files in this folder are left out of the Changes tab and are not added to SVN. " +
+                        "Common entries: Library, Temp, *.tmp, *.user. Leave it empty to remove the property.",
+                        MessageType.None);
+                    string shown = editable ? model.IgnoreDesired ?? "" : "";
+                    EditorGUI.BeginChangeCheck();
+                    string typed = EditorGUILayout.TextArea(shown, GUILayout.MinHeight(80));
+                    if (EditorGUI.EndChangeCheck() && editable) model.IgnoreDesired = typed;
+                    EditorGUILayout.Space();
+                }
+            }
+
+            if (editable && model.OtherProperties.Count > 0)
+            {
+                EditorGUILayout.LabelField("Other properties on this path", EditorStyles.boldLabel);
+                m_OtherScroll = EditorGUILayout.BeginScrollView(m_OtherScroll, GUILayout.MaxHeight(90));
+                foreach (var kv in model.OtherProperties)
+                {
+                    EditorGUILayout.LabelField(kv.Key, SvnPropertiesModel.Preview(kv.Value), EditorStyles.miniLabel);
+                }
+                EditorGUILayout.EndScrollView();
                 EditorGUILayout.Space();
             }
 
-            // Custom prop
             EditorGUILayout.LabelField("Custom property (one-off)", EditorStyles.boldLabel);
-            EditorGUILayout.HelpBox(
-                "For ad-hoc properties beyond svn:needs-lock and svn:ignore. Use sparingly.",
-                MessageType.None);
-            EditorGUILayout.BeginHorizontal();
-            m_CustomKey = EditorGUILayout.TextField(new GUIContent("Key"), m_CustomKey);
-            m_CustomValue = EditorGUILayout.TextField(new GUIContent("Value"), m_CustomValue);
-            EditorGUILayout.EndHorizontal();
-            using (new EditorGUI.DisabledScope(string.IsNullOrEmpty(m_CustomKey)))
+            EditorGUILayout.HelpBox("For properties beyond svn:needs-lock and svn:ignore. Use sparingly.", MessageType.None);
+            using (new EditorGUI.DisabledScope(!editable))
             {
-                if (GUILayout.Button(new GUIContent("Set custom property",
-                                                    "Runs `svn propset <key> <value> <path>`")))
+                EditorGUILayout.BeginHorizontal();
+                m_CustomKey = EditorGUILayout.TextField(new GUIContent("Key"), m_CustomKey);
+                m_CustomValue = EditorGUILayout.TextField(new GUIContent("Value"), m_CustomValue);
+                EditorGUILayout.EndHorizontal();
+                using (new EditorGUI.DisabledScope(string.IsNullOrWhiteSpace(m_CustomKey) || pending))
                 {
-                    SetCustomProperty();
+                    var tip = pending
+                        ? "Apply or reload your other changes first."
+                        : "Sets the property on this path. Commit to share it.";
+                    if (GUILayout.Button(new GUIContent("Set custom property", tip)))
+                    {
+                        SetCustomProperty();
+                    }
                 }
             }
 
             EditorGUILayout.Space();
-
             EditorGUILayout.BeginHorizontal();
             GUILayout.FlexibleSpace();
-            if (GUILayout.Button(new GUIContent("Reload",
-                                                "Re-read the current SVN properties from the working copy"),
-                                 GUILayout.Width(100), GUILayout.Height(28)))
+            using (new EditorGUI.DisabledScope(m_Busy))
             {
-                ReloadProperties();
-                m_StatusBanner = "Reloaded.";
+                if (GUILayout.Button(new GUIContent("Reload", "Re-read the SVN properties from the working copy"),
+                                     GUILayout.Width(100), GUILayout.Height(28)))
+                {
+                    if (!pending || EditorUtility.DisplayDialog("Discard unapplied changes?",
+                            "Reloading discards the property changes you have not applied yet.", "Discard", "Keep editing"))
+                    {
+                        Reload("Reloaded.");
+                    }
+                }
             }
-            using (new EditorGUI.DisabledScope(!HasPendingChanges()))
+            using (new EditorGUI.DisabledScope(!pending))
             {
-                if (GUILayout.Button(new GUIContent("Apply Changes",
-                                                    "Apply property additions/removals/changes via svn propset/propdel"),
+                if (GUILayout.Button(new GUIContent("Apply Changes", "Write the changed properties to the working copy"),
                                      GUILayout.Width(140), GUILayout.Height(28)))
                 {
                     ApplyChanges();
@@ -160,102 +232,63 @@ namespace FRGVersionControl.UI
 
             if (!string.IsNullOrEmpty(m_StatusBanner))
             {
-                EditorGUILayout.HelpBox(m_StatusBanner,
-                    m_StatusBanner.StartsWith("Error", System.StringComparison.OrdinalIgnoreCase)
-                        ? MessageType.Error : MessageType.Info);
+                EditorGUILayout.HelpBox(m_StatusBanner, m_StatusIsError ? MessageType.Error : MessageType.Info);
             }
         }
 
-        private bool HasPendingChanges()
-        {
-            if (m_NeedsLockNew != m_NeedsLockCurrent) return true;
-            if (m_IsDirectory && m_IgnoreNew != m_IgnoreCurrent) return true;
-            return false;
-        }
+        private string CommitHint(string path) =>
+            $"Property changes are local until you commit {Path.GetFileName(path)}. Commit it from the Changes tab.";
 
         private void ApplyChanges()
         {
-            if (m_NeedsLockNew != m_NeedsLockCurrent)
+            var model = m_Model;
+            var path = model.Path;
+            var isDirectory = model.IsDirectory;
+            List<PropChange> plan = model.PlanChanges();
+            RunAsync("Applying…", async () =>
             {
-                if (m_NeedsLockNew)
+                var written = await SvnPropertiesModel.WriteAsync(IpcPropertyOps.Instance, path, plan);
+                var fetched = await SvnPropertiesModel.FetchAsync(IpcPropertyOps.Instance, path);
+                return (written, fetched);
+            }, outcome =>
+            {
+                var reloaded = new SvnPropertiesModel(path, isDirectory);
+                reloaded.Publish(outcome.fetched);
+                m_Model = reloaded;
+                _ = SvnStatusCache.RefreshAsync();
+                var result = outcome.written;
+                if (result.Success)
                 {
-                    string tmp = WriteTempPropFile("*");
-                    var r = SvnCommandRunner.Run($"propset svn:needs-lock --file=\"{tmp}\" \"{m_Path}\"");
-                    File.Delete(tmp);
-                    if (!r.success)
-                    {
-                        m_StatusBanner = $"Error setting svn:needs-lock: {r.error?.Split('\n')[0]}. " +
-                                          "Check Console for full output.";
-                        return;
-                    }
+                    SetBanner("Changes applied. " + CommitHint(path), false);
                 }
                 else
                 {
-                    var r = SvnCommandRunner.Run($"propdel svn:needs-lock \"{m_Path}\"");
-                    if (!r.success)
-                    {
-                        m_StatusBanner = $"Error removing svn:needs-lock: {r.error?.Split('\n')[0]}. " +
-                                          "Check Console for full output.";
-                        return;
-                    }
+                    var landed = result.Applied.Count > 0 ? $" Applied before the failure: {string.Join(", ", result.Applied)}." : "";
+                    SetBanner($"Error: could not {result.Failed}: {result.Error}{landed}", true);
                 }
-            }
-
-            if (m_IsDirectory && m_IgnoreNew != m_IgnoreCurrent)
-            {
-                if (string.IsNullOrEmpty(m_IgnoreNew.Trim()))
-                {
-                    var r = SvnCommandRunner.Run($"propdel svn:ignore \"{m_Path}\"");
-                    if (!r.success)
-                    {
-                        m_StatusBanner = $"Error removing svn:ignore: {r.error?.Split('\n')[0]}.";
-                        return;
-                    }
-                }
-                else
-                {
-                    string tmp = WriteTempPropFile(m_IgnoreNew);
-                    var r = SvnCommandRunner.Run($"propset svn:ignore --file=\"{tmp}\" \"{m_Path}\"");
-                    File.Delete(tmp);
-                    if (!r.success)
-                    {
-                        m_StatusBanner = $"Error setting svn:ignore: {r.error?.Split('\n')[0]}.";
-                        return;
-                    }
-                }
-            }
-
-            m_StatusBanner = "Changes applied.";
-            ReloadProperties();
-            // Refresh the status cache so the panel reflects the property changes
-            _ = FRGVersionControl.Core.SvnStatusCache.RefreshAsync();
+                if (reloaded.LoadError != null) SetBanner(m_StatusBanner + " Reload failed: " + reloaded.LoadError, true);
+            });
         }
 
         private void SetCustomProperty()
         {
-            string tmp = WriteTempPropFile(m_CustomValue ?? "");
-            var r = SvnCommandRunner.Run($"propset {m_CustomKey} --file=\"{tmp}\" \"{m_Path}\"");
-            File.Delete(tmp);
-            if (!r.success)
+            var path = m_Path;
+            var key = m_CustomKey.Trim();
+            var value = m_CustomValue ?? "";
+            RunAsync($"Setting {key}…", () => IpcPropertyOps.Instance.Set(path, key, value), r =>
             {
-                m_StatusBanner = $"Error setting {m_CustomKey}: {r.error?.Split('\n')[0]}. " +
-                                  "Check Console.";
-            }
-            else
-            {
-                m_StatusBanner = $"Set {m_CustomKey}={m_CustomValue}";
-                m_CustomKey = "";
-                m_CustomValue = "";
-            }
-        }
-
-        /// <summary>Write a value to a temp file and return its path. Used to avoid shell-glob
-        /// expansion of the value (e.g., '*' for svn:needs-lock would shell-glob without --file).</summary>
-        private static string WriteTempPropFile(string content)
-        {
-            string tmp = Path.Combine(Path.GetTempPath(), $"FRGVersionControl-prop-{System.Guid.NewGuid():N}.txt");
-            File.WriteAllText(tmp, content);
-            return tmp;
+                if (r.success)
+                {
+                    m_CustomKey = "";
+                    m_CustomValue = "";
+                    _ = SvnStatusCache.RefreshAsync();
+                    Reload($"Set {key}. " + CommitHint(path));
+                }
+                else
+                {
+                    SetBanner($"Error setting {key}: {r.error}", true);
+                }
+            });
         }
     }
 }

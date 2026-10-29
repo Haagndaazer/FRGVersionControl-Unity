@@ -551,6 +551,47 @@ namespace FRGVersionControl.Core.Svn
             return changed;
         }
 
+        /// <summary>Every versioned property on one path (SVN_CORE_API.md §5.13). svn: values
+        /// arrive in their stored LF form.</summary>
+        public static async Task<PropListResult> PropListAsync(string path)
+        {
+            var client = FRGVersionControl.Core.FileLockManager.Instance.IpcClient;
+            if (!client.IsAvailable) return new PropListResult { success = false, error = IpcUnavailable("prop.list").error };
+            try
+            {
+                var raw = await client.InvokeRawAsync("prop.list", "{\"path\":\"" + IpcEscape(path) + "\"}", client.BuildDefaultContext()).ConfigureAwait(false);
+                if (!raw.Ok) return new PropListResult { success = false, error = FormatIpcError(raw, "prop.list") };
+                return new PropListResult { success = true, props = IpcResponseParsers.ParseStringMap(raw.RawLine, "props") };
+            }
+            catch (Exception ex)
+            {
+                return new PropListResult { success = false, error = $"Could not read SVN properties: {ex.Message}. Click Reload to try again." };
+            }
+        }
+
+        public static Task<SvnResult> PropSetAsync(string path, string name, string value) =>
+            PropWriteAsync("prop.set", "{\"path\":\"" + IpcEscape(path) + "\",\"name\":\"" + IpcEscape(name) + "\",\"value\":\"" + IpcEscape(value ?? "") + "\"}");
+
+        public static Task<SvnResult> PropDeleteAsync(string path, string name) =>
+            PropWriteAsync("prop.delete", "{\"path\":\"" + IpcEscape(path) + "\",\"name\":\"" + IpcEscape(name) + "\"}");
+
+        private static async Task<SvnResult> PropWriteAsync(string op, string argsJson)
+        {
+            var client = FRGVersionControl.Core.FileLockManager.Instance.IpcClient;
+            if (!client.IsAvailable) return IpcUnavailable(op);
+            try
+            {
+                var raw = await client.InvokeRawAsync(op, argsJson, client.BuildDefaultContext()).ConfigureAwait(false);
+                return raw.Ok
+                    ? new SvnResult { success = true, output = op + " ok (ipc)" }
+                    : new SvnResult { success = false, error = FormatIpcError(raw, op) };
+            }
+            catch (Exception ex)
+            {
+                return new SvnResult { success = false, error = $"IPC {op} threw: {ex.Message} — Click Reload, then try again." };
+            }
+        }
+
         public static SvnResult Add(string[] paths)
         {
             if (paths == null || paths.Length == 0)
@@ -1234,6 +1275,13 @@ namespace FRGVersionControl.Core.Svn
     // ========================================================================
     // Supporting types
     // ========================================================================
+
+    public sealed class PropListResult
+    {
+        public bool success;
+        public string error;
+        public Dictionary<string, string> props = new Dictionary<string, string>(StringComparer.Ordinal);
+    }
 
     public class SvnResult
     {

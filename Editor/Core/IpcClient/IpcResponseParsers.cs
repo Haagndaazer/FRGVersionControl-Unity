@@ -194,6 +194,35 @@ namespace FRGVersionControl.Core.IpcClient
             return dict;
         }
 
+        /// <summary>A string→string object under <c>result.&lt;key&gt;</c> (e.g. prop.list's
+        /// <c>props</c>); missing key → empty, garbled → throws.</summary>
+        public static Dictionary<string, string> ParseStringMap(string rawJson, string key)
+        {
+            var dict = new Dictionary<string, string>(StringComparer.Ordinal);
+            if (string.IsNullOrEmpty(rawJson)) return dict;
+            int k = IpcJson.FindKey(rawJson, key, 0);
+            if (k < 0) return dict;
+            int i = IpcJson.SkipWhitespace(rawJson, IpcJson.AfterColon(rawJson, k));
+            if (i >= rawJson.Length || rawJson[i] != '{') return dict;
+            int end = IpcJson.FindClose(rawJson, i);
+            if (end < 0) throw new FormatException(key + ": unterminated object");
+            i++;
+            while (true)
+            {
+                i = IpcJson.SkipWhitespace(rawJson, i);
+                if (i >= end) break;
+                if (rawJson[i] == ',') { i++; continue; }
+                if (rawJson[i] != '"') throw new FormatException(key + ": expected a name at " + i);
+                var name = IpcJson.ReadString(rawJson, i, out i);
+                i = IpcJson.SkipWhitespace(rawJson, i);
+                if (i >= end || rawJson[i] != ':') throw new FormatException(key + ": expected ':' after a name");
+                i = IpcJson.SkipWhitespace(rawJson, i + 1);
+                if (i >= end || rawJson[i] != '"') throw new FormatException(key + ": expected a string value");
+                dict[name] = IpcJson.ReadString(rawJson, i, out i);
+            }
+            return dict;
+        }
+
         public static SvnFileStatus MapWcStatus(string wc, string prop)
         {
             switch (wc)

@@ -503,7 +503,7 @@ namespace FRGVersionControl.Core.IpcClient
                 var ctx = BuildDefaultContext();
                 var args = "{\"depth\":\"infinity\",\"includeUpstream\":true}";
                 var result = await InvokeRawAsync("status.allEntries", args, ctx, ct).ConfigureAwait(false);
-                return r.From(result, ParseLockMap);
+                return r.From(result, IpcResponseParsers.ParseLockMap);
             }
             catch (Exception ex)
             {
@@ -543,7 +543,7 @@ namespace FRGVersionControl.Core.IpcClient
                 var result = await InvokeRawAsync("status.query", args.ToString(), BuildDefaultContext(), ct).ConfigureAwait(false);
                 return r.From(result, raw =>
                 {
-                    var map = ParseStatusMap(raw);
+                    var map = IpcResponseParsers.ParseStatusMap(raw);
                     var normalized = new System.Collections.Generic.Dictionary<string, FRGVersionControl.Core.Svn.SvnStatusEntry>(StringComparer.OrdinalIgnoreCase);
                     foreach (var kv in map) normalized[(kv.Key ?? "").Replace('\\', '/')] = kv.Value;
                     return normalized;
@@ -565,134 +565,13 @@ namespace FRGVersionControl.Core.IpcClient
             {
                 var ctx = BuildDefaultContext();
                 var result = await InvokeRawAsync("status.allEntries", "{\"depth\":\"infinity\"}", ctx, ct).ConfigureAwait(false);
-                return r.From(result, ParseStatusMap);
+                return r.From(result, IpcResponseParsers.ParseStatusMap);
             }
             catch (Exception ex)
             {
                 r.Error = ex.Message;
                 return r;
             }
-        }
-
-        private static System.Collections.Generic.Dictionary<string, FRGVersionControl.Core.Svn.SvnStatusEntry>
-            ParseStatusMap(string rawJson)
-        {
-            var dict = new System.Collections.Generic.Dictionary<string, FRGVersionControl.Core.Svn.SvnStatusEntry>(
-                System.StringComparer.Ordinal);
-            int entriesIdx = rawJson.IndexOf("\"entries\":[", System.StringComparison.Ordinal);
-            if (entriesIdx < 0) return dict;
-            int pos = entriesIdx + "\"entries\":[".Length;
-            while (pos < rawJson.Length)
-            {
-                int openBrace = rawJson.IndexOf('{', pos);
-                if (openBrace < 0) break;
-                int closeBrace = rawJson.IndexOf('}', openBrace);
-                if (closeBrace < 0) break;
-                var entryJson = rawJson.Substring(openBrace, closeBrace - openBrace + 1);
-                pos = closeBrace + 1;
-
-                var info = JsonUtility.FromJson<StatusEntryShim>(entryJson);
-                if (info == null || string.IsNullOrEmpty(info.path)) continue;
-
-                dict[info.path] = new FRGVersionControl.Core.Svn.SvnStatusEntry
-                {
-                    path = info.path,
-                    status = MapWcStatus(info.wcStatus, info.propStatus),
-                    lockState = MapLockState(info.lockState),
-                    lockOwner = info.lockOwner ?? "",
-                    changelist = info.changelist,
-                    revision = 0, // not surfaced by status.allEntries — callers using this for display only
-                    outOfDate = false, // requires `-u` and parsing repos-status, defer until needed
-                };
-                if (pos < rawJson.Length && rawJson[pos] == ']') break;
-            }
-            return dict;
-        }
-
-        private static FRGVersionControl.Core.Svn.SvnFileStatus MapWcStatus(string wc, string prop)
-        {
-            // svn status --xml wc-status item values mapped to SvnFileStatus enum.
-            switch (wc)
-            {
-                case "modified": return FRGVersionControl.Core.Svn.SvnFileStatus.Modified;
-                case "added": return FRGVersionControl.Core.Svn.SvnFileStatus.Added;
-                case "deleted": return FRGVersionControl.Core.Svn.SvnFileStatus.Deleted;
-                case "replaced": return FRGVersionControl.Core.Svn.SvnFileStatus.Replaced;
-                case "conflicted": return FRGVersionControl.Core.Svn.SvnFileStatus.Conflict;
-                case "missing": return FRGVersionControl.Core.Svn.SvnFileStatus.Missing;
-                case "unversioned": return FRGVersionControl.Core.Svn.SvnFileStatus.Untracked;
-                case "ignored": return FRGVersionControl.Core.Svn.SvnFileStatus.Ignored;
-                case "normal":
-                    // wc-status normal but prop-status modified → Modified (prop-only change)
-                    return prop == "modified" || prop == "conflicted"
-                        ? FRGVersionControl.Core.Svn.SvnFileStatus.Modified
-                        : FRGVersionControl.Core.Svn.SvnFileStatus.None;
-                default: return FRGVersionControl.Core.Svn.SvnFileStatus.None;
-            }
-        }
-
-        private static FRGVersionControl.Core.Svn.LockState MapLockState(string s) => s switch
-        {
-            "K" => FRGVersionControl.Core.Svn.LockState.K,
-            "O" => FRGVersionControl.Core.Svn.LockState.O,
-            "B" => FRGVersionControl.Core.Svn.LockState.B,
-            "T" => FRGVersionControl.Core.Svn.LockState.T,
-            _ => FRGVersionControl.Core.Svn.LockState.None,
-        };
-
-        private static System.Collections.Generic.Dictionary<string, FRGVersionControl.Core.Svn.SvnLockInfo>
-            ParseLockMap(string rawJson)
-        {
-            // Hand-roll the parse — JsonUtility doesn't handle the nested entries array
-            // shape, and we only need three fields per entry (path, lockState, lockOwner).
-            var dict = new System.Collections.Generic.Dictionary<string, FRGVersionControl.Core.Svn.SvnLockInfo>(
-                System.StringComparer.Ordinal);
-            int entriesIdx = rawJson.IndexOf("\"entries\":[", System.StringComparison.Ordinal);
-            if (entriesIdx < 0) return dict;
-            int pos = entriesIdx + "\"entries\":[".Length;
-            while (pos < rawJson.Length)
-            {
-                int openBrace = rawJson.IndexOf('{', pos);
-                if (openBrace < 0) break;
-                int closeBrace = rawJson.IndexOf('}', openBrace);
-                if (closeBrace < 0) break;
-                var entryJson = rawJson.Substring(openBrace, closeBrace - openBrace + 1);
-                pos = closeBrace + 1;
-
-                var info = JsonUtility.FromJson<StatusEntryShim>(entryJson);
-                if (info == null || string.IsNullOrEmpty(info.path)) continue;
-                var state = info.lockState switch
-                {
-                    "K" => FRGVersionControl.Core.Svn.LockState.K,
-                    "O" => FRGVersionControl.Core.Svn.LockState.O,
-                    "B" => FRGVersionControl.Core.Svn.LockState.B,
-                    "T" => FRGVersionControl.Core.Svn.LockState.T,
-                    _ => FRGVersionControl.Core.Svn.LockState.None,
-                };
-                if (state == FRGVersionControl.Core.Svn.LockState.None) continue;
-                dict[info.path] = new FRGVersionControl.Core.Svn.SvnLockInfo
-                {
-                    path = info.path,
-                    state = state,
-                    lockOwner = info.lockOwner ?? "",
-                    lockMessage = "",
-                    lockCreated = null,
-                };
-                if (rawJson[pos] == ']') break;
-            }
-            return dict;
-        }
-
-        [System.Serializable]
-        private sealed class StatusEntryShim
-        {
-            public string path;
-            public string wcStatus;
-            public string propStatus;
-            public string changelist;
-            public string lockState;
-            public string lockOwner;
-            public long lockedRev;
         }
 
         /// <summary>

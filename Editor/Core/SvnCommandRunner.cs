@@ -137,7 +137,7 @@ namespace FRGVersionControl.Core.Svn
                 sb.Append("}");
                 var result = client.InvokeRawAsync("status.query", sb.ToString(), ctx).GetAwaiter().GetResult();
                 if (!result.Ok) return null;
-                return ParseFirstStatusEntryFromIpc(result.RawLine, path);
+                return FRGVersionControl.Core.IpcClient.IpcResponseParsers.ParseFirstStatusEntry(result.RawLine);
             }
             catch (Exception ex)
             {
@@ -252,7 +252,7 @@ namespace FRGVersionControl.Core.Svn
                 var ctx = client.BuildDefaultContext();
                 var result = client.InvokeRawAsync("cl.membership", "{}", ctx).GetAwaiter().GetResult();
                 if (!result.Ok) return new Dictionary<string, List<string>>();
-                return ParseChangelistMembership(result.RawLine);
+                return FRGVersionControl.Core.IpcClient.IpcResponseParsers.ParseChangelistMembership(result.RawLine);
             }
             catch (Exception ex)
             {
@@ -831,7 +831,7 @@ namespace FRGVersionControl.Core.Svn
                 var args = $"{{\"path\":\"{IpcEscape(path)}\",\"limit\":{limit}}}";
                 var result = client.InvokeRawAsync("hist.log", args, ctx).GetAwaiter().GetResult();
                 if (!result.Ok) return new List<SvnLogEntry>();
-                return ParseLogEntriesFromIpc(result.RawLine);
+                return FRGVersionControl.Core.IpcClient.IpcResponseParsers.ParseLogEntries(result.RawLine);
             }
             catch (Exception ex)
             {
@@ -1182,181 +1182,6 @@ namespace FRGVersionControl.Core.Svn
             return sb.ToString();
         }
 
-        // ====================================================================
-        // IPC response parsers (kept — no svn.exe spawning, just JSON manipulation)
-        // ====================================================================
-
-        // ====================================================================
-        // Test-only XML parser stubs (deprecated; legacy XML parsing moved to
-        // SvnCore — the corresponding tests should move to SvnCore.Tests).
-        // ====================================================================
-
-        [Obsolete("XML parsing moved to SvnCore. These stubs return null for back-compat " +
-                  "with legacy NUnit tests; port the tests to SvnCore.Tests for real coverage.")]
-        public static SvnStatusEntry ParseStatusXmlForTest(string xml, string queryPath) => null;
-
-        [Obsolete("XML parsing moved to SvnCore. These stubs return null for back-compat " +
-                  "with legacy NUnit tests; port the tests to SvnCore.Tests for real coverage.")]
-        public static SvnLockInfo ParseLockInfoFromXmlForTest(string xml, string entryPath) => null;
-
-        private static SvnStatusEntry ParseFirstStatusEntryFromIpc(string rawJson, string requestedPath)
-        {
-            int entriesIdx = rawJson.IndexOf("\"entries\":[", StringComparison.Ordinal);
-            if (entriesIdx < 0) return null;
-            int openBrace = rawJson.IndexOf('{', entriesIdx);
-            if (openBrace < 0) return null;
-            int closeBrace = rawJson.IndexOf('}', openBrace);
-            if (closeBrace < 0) return null;
-            var entryJson = rawJson.Substring(openBrace, closeBrace - openBrace + 1);
-            var shim = UnityEngine.JsonUtility.FromJson<IpcStatusEntryShim>(entryJson);
-            if (shim == null || string.IsNullOrEmpty(shim.path)) return null;
-
-            return new SvnStatusEntry
-            {
-                path = shim.path,
-                status = MapWcStatus(shim.wcStatus, shim.propStatus),
-                lockState = MapLockState(shim.lockState),
-                lockOwner = shim.lockOwner ?? "",
-                changelist = shim.changelist,
-                revision = 0,
-                outOfDate = false,
-            };
-        }
-
-        private static Dictionary<string, List<string>> ParseChangelistMembership(string rawJson)
-        {
-            var dict = new Dictionary<string, List<string>>(StringComparer.Ordinal);
-            int memIdx = rawJson.IndexOf("\"membership\":{", StringComparison.Ordinal);
-            if (memIdx < 0) return dict;
-            int pos = memIdx + "\"membership\":".Length;
-            int objStart = rawJson.IndexOf('{', pos);
-            if (objStart < 0) return dict;
-            int depth = 1;
-            int cursor = objStart + 1;
-            while (cursor < rawJson.Length && depth > 0)
-            {
-                if (rawJson[cursor] == '"')
-                {
-                    int keyStart = cursor + 1;
-                    int keyEnd = rawJson.IndexOf('"', keyStart);
-                    if (keyEnd < 0) break;
-                    var keyName = rawJson.Substring(keyStart, keyEnd - keyStart);
-                    int colon = rawJson.IndexOf(':', keyEnd);
-                    if (colon < 0) break;
-                    int arrStart = rawJson.IndexOf('[', colon);
-                    if (arrStart < 0) break;
-                    int arrEnd = rawJson.IndexOf(']', arrStart);
-                    if (arrEnd < 0) break;
-                    var arrText = rawJson.Substring(arrStart + 1, arrEnd - arrStart - 1);
-                    var paths = ExtractStringArray(arrText);
-                    dict[keyName] = paths;
-                    cursor = arrEnd + 1;
-                }
-                else if (rawJson[cursor] == '{') { depth++; cursor++; }
-                else if (rawJson[cursor] == '}') { depth--; cursor++; }
-                else cursor++;
-            }
-            return dict;
-        }
-
-        private static List<string> ExtractStringArray(string arrayContents)
-        {
-            var result = new List<string>();
-            int i = 0;
-            while (i < arrayContents.Length)
-            {
-                int q1 = arrayContents.IndexOf('"', i);
-                if (q1 < 0) break;
-                int q2 = q1 + 1;
-                var sb = new StringBuilder();
-                while (q2 < arrayContents.Length && arrayContents[q2] != '"')
-                {
-                    if (arrayContents[q2] == '\\' && q2 + 1 < arrayContents.Length)
-                    {
-                        sb.Append(arrayContents[q2 + 1]);
-                        q2 += 2;
-                    }
-                    else { sb.Append(arrayContents[q2]); q2++; }
-                }
-                result.Add(sb.ToString());
-                i = q2 + 1;
-            }
-            return result;
-        }
-
-        private static List<SvnLogEntry> ParseLogEntriesFromIpc(string rawJson)
-        {
-            var entries = new List<SvnLogEntry>();
-            int idx = rawJson.IndexOf("\"revisions\":[", StringComparison.Ordinal);
-            if (idx < 0) return entries;
-            int pos = idx + "\"revisions\":[".Length;
-            while (pos < rawJson.Length)
-            {
-                int open = rawJson.IndexOf('{', pos);
-                if (open < 0) break;
-                int close = FindMatchingBrace(rawJson, open);
-                if (close < 0) break;
-                var entryJson = rawJson.Substring(open, close - open + 1);
-                var shim = UnityEngine.JsonUtility.FromJson<IpcLogShim>(entryJson);
-                if (shim != null)
-                {
-                    entries.Add(new SvnLogEntry
-                    {
-                        revision = (int)shim.revision,
-                        author = shim.author ?? "",
-                        date = shim.date ?? "",
-                        message = shim.message ?? "",
-                    });
-                }
-                pos = close + 1;
-                if (pos < rawJson.Length && rawJson[pos] == ']') break;
-            }
-            return entries;
-        }
-
-        private static int FindMatchingBrace(string s, int openIdx)
-        {
-            int depth = 1;
-            for (int i = openIdx + 1; i < s.Length; i++)
-            {
-                if (s[i] == '{') depth++;
-                else if (s[i] == '}') { depth--; if (depth == 0) return i; }
-            }
-            return -1;
-        }
-
-        private static SvnFileStatus MapWcStatus(string wc, string prop)
-        {
-            switch (wc)
-            {
-                case "modified": return SvnFileStatus.Modified;
-                case "added": return SvnFileStatus.Added;
-                case "deleted": return SvnFileStatus.Deleted;
-                case "replaced": return SvnFileStatus.Replaced;
-                case "conflicted": return SvnFileStatus.Conflict;
-                case "missing": return SvnFileStatus.Missing;
-                case "unversioned": return SvnFileStatus.Untracked;
-                case "ignored": return SvnFileStatus.Ignored;
-                case "normal":
-                    return prop == "modified" || prop == "conflicted"
-                        ? SvnFileStatus.Modified
-                        : SvnFileStatus.None;
-                default: return SvnFileStatus.None;
-            }
-        }
-
-        private static LockState MapLockState(string s)
-        {
-            switch (s)
-            {
-                case "K": return LockState.K;
-                case "O": return LockState.O;
-                case "B": return LockState.B;
-                case "T": return LockState.T;
-                default: return LockState.None;
-            }
-        }
-
         [Serializable]
         private sealed class IpcInfoShim
         {
@@ -1404,26 +1229,6 @@ namespace FRGVersionControl.Core.Svn
             public IpcReconcileFail[] failed;
         }
 
-        [Serializable]
-        private sealed class IpcStatusEntryShim
-        {
-            public string path;
-            public string wcStatus;
-            public string propStatus;
-            public string changelist;
-            public string lockState;
-            public string lockOwner;
-            public long lockedRev;
-        }
-
-        [Serializable]
-        private sealed class IpcLogShim
-        {
-            public long revision;
-            public string author;
-            public string date;
-            public string message;
-        }
     }
 
     // ========================================================================

@@ -70,7 +70,7 @@ namespace FRGVersionControl.Core.Changelists
                 var ctx = client.BuildDefaultContext();
                 var result = client.InvokeRawAsync("cl.userListGet", "{}", ctx).GetAwaiter().GetResult();
                 if (!result.Ok) return null;
-                return ParseNamesArray(result.RawLine);
+                return FRGVersionControl.Core.IpcClient.IpcResponseParsers.ParseNamesArray(result.RawLine);
             }
             catch { return null; }
         }
@@ -93,50 +93,6 @@ namespace FRGVersionControl.Core.Changelists
                 return result.Ok;
             }
             catch { return false; }
-        }
-
-        private static List<string> ParseNamesArray(string rawJson)
-        {
-            var list = new List<string>();
-            int idx = rawJson.IndexOf("\"names\":[", StringComparison.Ordinal);
-            if (idx < 0) return list;
-            int start = idx + "\"names\":[".Length;
-            int end = rawJson.IndexOf(']', start);
-            if (end < 0) return list;
-            var arr = rawJson.Substring(start, end - start);
-            int i = 0;
-            while (i < arr.Length)
-            {
-                int q1 = arr.IndexOf('"', i);
-                if (q1 < 0) break;
-                int q2 = q1 + 1;
-                var sb = new System.Text.StringBuilder();
-                while (q2 < arr.Length && arr[q2] != '"')
-                {
-                    if (arr[q2] == '\\' && q2 + 1 < arr.Length)
-                    {
-                        char esc = arr[q2 + 1];
-                        switch (esc)
-                        {
-                            case 'n': sb.Append('\n'); break;
-                            case 'r': sb.Append('\r'); break;
-                            case 't': sb.Append('\t'); break;
-                            case '"': sb.Append('"'); break;
-                            case '\\': sb.Append('\\'); break;
-                            default: sb.Append(esc); break;
-                        }
-                        q2 += 2;
-                    }
-                    else
-                    {
-                        sb.Append(arr[q2]);
-                        q2++;
-                    }
-                }
-                list.Add(sb.ToString());
-                i = q2 + 1;
-            }
-            return list;
         }
 
         private static string IpcEscape(string s)

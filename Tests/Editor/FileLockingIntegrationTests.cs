@@ -4,7 +4,6 @@ using FRGVersionControl.Core;
 using FRGVersionControl.Core.Svn;
 using FRGVersionControl.Services;
 using System;
-using System.Threading;
 using System.Threading.Tasks;
 
 namespace FRGVersionControl.Tests
@@ -130,11 +129,11 @@ namespace FRGVersionControl.Tests
             var manager = FileLockManager.Instance;
             Assert.IsNotNull(manager, "Manager should not be null");
 
-            // Note: IsInitialized may be false if svn is not available
-            if (manager.IsInitialized)
+            if (!manager.IsInitialized)
             {
-                Assert.IsNotEmpty(manager.UserEmail, "User email should be set");
+                Assert.Inconclusive("FileLockManager is not initialized in this project (no svn-core, no cached SVN username, or locking disabled); nothing to assert.");
             }
+            Assert.IsNotEmpty(manager.UserName, "An initialized manager must have the SVN username (email is optional and only feeds lock history)");
         }
 
         // -------------------------------------------------------------
@@ -212,216 +211,23 @@ namespace FRGVersionControl.Tests
         }
 
         // -------------------------------------------------------------
-        // Phase 3 closure Test 4: parser regression tests for K/O/B/T/None states.
-        // -------------------------------------------------------------
-        // Phase 3 Session 2 surfaced a parser bug: ParseSingleStatusEntry and
-        // ParseLockInfoFromEntry mis-detected `B` because they required `<repos-status>`
-        // element presence, but SVN omits that element when the server has no lock at all.
-        // Fix detects server-was-queried via `<against>` element. These tests pin the
-        // contract against future drift. XML samples captured live from svn 1.14.5 against
-        // VisualSVN Server during Phase 3 closure — represent real wire format, not invented.
-        // BOTH parsers tested because they have duplicated-but-not-identical logic.
-
-        private const string TestPath = "Assets\\Scenes\\Cockpit\\Art\\Environment\\Materials\\AsteroidCluster_Mat.mat";
-
-        private const string XmlNone = @"<?xml version=""1.0"" encoding=""UTF-8""?>
-<status>
-<target path=""Assets\Scenes\Cockpit\Art\Environment\Materials\AsteroidCluster_Mat.mat"">
-<against revision=""27""/>
-</target>
-</status>";
-
-        private const string XmlK = @"<?xml version=""1.0"" encoding=""UTF-8""?>
-<status>
-<target path=""Assets\Scenes\Cockpit\Art\Environment\Materials\AsteroidCluster_Mat.mat"">
-<entry path=""Assets\Scenes\Cockpit\Art\Environment\Materials\AsteroidCluster_Mat.mat"">
-<wc-status item=""normal"" revision=""24"" props=""normal"">
-<commit revision=""24""><author>admin</author><date>2026-05-07T21:37:09.610377Z</date></commit>
-<lock>
-<token>opaquelocktoken:9e970409-3f68-0242-947e-00833a3da804</token>
-<owner>admin</owner>
-<comment>[xml-K]</comment>
-<created>2026-05-07T22:44:14.890089Z</created>
-</lock>
-</wc-status>
-<repos-status props=""none"" item=""none"">
-<lock>
-<token>opaquelocktoken:9e970409-3f68-0242-947e-00833a3da804</token>
-<owner>admin</owner>
-<comment>[xml-K]</comment>
-<created>2026-05-07T22:44:14.890089Z</created>
-</lock>
-</repos-status>
-</entry>
-<against revision=""27""/>
-</target>
-</status>";
-
-        private const string XmlO = @"<?xml version=""1.0"" encoding=""UTF-8""?>
-<status>
-<target path=""Assets\Scenes\Cockpit\Art\Environment\Materials\AsteroidCluster_Mat.mat"">
-<entry path=""Assets\Scenes\Cockpit\Art\Environment\Materials\AsteroidCluster_Mat.mat"">
-<wc-status item=""normal"" revision=""27"" props=""normal""></wc-status>
-<repos-status item=""none"" props=""none"">
-<lock>
-<token>opaquelocktoken:9e970409-3f68-0242-947e-00833a3da804</token>
-<owner>admin</owner>
-<comment>[xml-K]</comment>
-<created>2026-05-07T22:44:14.890089Z</created>
-</lock>
-</repos-status>
-</entry>
-<against revision=""27""/>
-</target>
-</status>";
-
-        // The exact case Phase 3 fixed: wcLock present, no <repos-status> at all,
-        // <against> indicates server WAS queried — server has no lock; admin's WC has stale token.
-        private const string XmlB = @"<?xml version=""1.0"" encoding=""UTF-8""?>
-<status>
-<target path=""Assets\Scenes\Cockpit\Art\Environment\Materials\AsteroidCluster_Mat.mat"">
-<entry path=""Assets\Scenes\Cockpit\Art\Environment\Materials\AsteroidCluster_Mat.mat"">
-<wc-status item=""normal"" revision=""24"" props=""normal"">
-<commit revision=""24""><author>admin</author><date>2026-05-07T21:37:09.610377Z</date></commit>
-<lock>
-<token>opaquelocktoken:9e970409-3f68-0242-947e-00833a3da804</token>
-<owner>admin</owner>
-<comment>[xml-K]</comment>
-<created>2026-05-07T22:44:14.890089Z</created>
-</lock>
-</wc-status>
-</entry>
-<against revision=""27""/>
-</target>
-</status>";
-
-        private const string XmlT = @"<?xml version=""1.0"" encoding=""UTF-8""?>
-<status>
-<target path=""Assets\Scenes\Cockpit\Art\Environment\Materials\AsteroidCluster_Mat.mat"">
-<entry path=""Assets\Scenes\Cockpit\Art\Environment\Materials\AsteroidCluster_Mat.mat"">
-<wc-status item=""normal"" revision=""24"" props=""normal"">
-<lock>
-<token>opaquelocktoken:9e970409-3f68-0242-947e-00833a3da804</token>
-<owner>admin</owner>
-<comment>[xml-K]</comment>
-<created>2026-05-07T22:44:14.890089Z</created>
-</lock>
-</wc-status>
-<repos-status item=""none"" props=""none"">
-<lock>
-<token>opaquelocktoken:7d2bfae9-52e6-be40-abbb-6d1d562ba7c6</token>
-<owner>artist</owner>
-<comment>[xml-T-setup] artist new lock</comment>
-<created>2026-05-07T22:44:34.379682Z</created>
-</lock>
-</repos-status>
-</entry>
-<against revision=""27""/>
-</target>
-</status>";
-
-        // ----- ParseStatusXmlForTest (wraps ParseSingleStatusEntry) -----
-
-        [Test]
-        public void TestParseStatusEntry_None()
-        {
-            var entry = FRGVersionControl.Core.Svn.SvnCommandRunner.ParseStatusXmlForTest(XmlNone, TestPath);
-            Assert.AreEqual(FRGVersionControl.Core.Svn.LockState.None, entry.lockState);
-        }
-
-        [Test]
-        public void TestParseStatusEntry_K_LockedByMe()
-        {
-            var entry = FRGVersionControl.Core.Svn.SvnCommandRunner.ParseStatusXmlForTest(XmlK, TestPath);
-            Assert.AreEqual(FRGVersionControl.Core.Svn.LockState.K, entry.lockState);
-            Assert.AreEqual("admin", entry.lockOwner);
-        }
-
-        [Test]
-        public void TestParseStatusEntry_O_LockedByOther()
-        {
-            var entry = FRGVersionControl.Core.Svn.SvnCommandRunner.ParseStatusXmlForTest(XmlO, TestPath);
-            Assert.AreEqual(FRGVersionControl.Core.Svn.LockState.O, entry.lockState);
-            Assert.AreEqual("admin", entry.lockOwner);
-        }
-
-        // The exact case Phase 3 fixed.
-        [Test]
-        public void TestParseStatusEntry_B_BrokenToken()
-        {
-            var entry = FRGVersionControl.Core.Svn.SvnCommandRunner.ParseStatusXmlForTest(XmlB, TestPath);
-            Assert.AreEqual(FRGVersionControl.Core.Svn.LockState.B, entry.lockState);
-            Assert.AreEqual("admin", entry.lockOwner);
-        }
-
-        [Test]
-        public void TestParseStatusEntry_T_StolenToken()
-        {
-            var entry = FRGVersionControl.Core.Svn.SvnCommandRunner.ParseStatusXmlForTest(XmlT, TestPath);
-            Assert.AreEqual(FRGVersionControl.Core.Svn.LockState.T, entry.lockState);
-            // T case: lockOwner reports the server-side (new) owner, not the WC's stale one
-            Assert.AreEqual("artist", entry.lockOwner);
-        }
-
-        // ----- ParseLockInfoFromXmlForTest (wraps ParseLockInfoFromEntry — used by StatusUpstreamAll) -----
-
-        [Test]
-        public void TestParseLockInfo_K_LockedByMe()
-        {
-            var info = FRGVersionControl.Core.Svn.SvnCommandRunner.ParseLockInfoFromXmlForTest(XmlK, TestPath);
-            Assert.AreEqual(FRGVersionControl.Core.Svn.LockState.K, info.state);
-            Assert.AreEqual("admin", info.lockOwner);
-        }
-
-        [Test]
-        public void TestParseLockInfo_O_LockedByOther()
-        {
-            var info = FRGVersionControl.Core.Svn.SvnCommandRunner.ParseLockInfoFromXmlForTest(XmlO, TestPath);
-            Assert.AreEqual(FRGVersionControl.Core.Svn.LockState.O, info.state);
-            Assert.AreEqual("admin", info.lockOwner);
-        }
-
-        [Test]
-        public void TestParseLockInfo_B_BrokenToken()
-        {
-            var info = FRGVersionControl.Core.Svn.SvnCommandRunner.ParseLockInfoFromXmlForTest(XmlB, TestPath);
-            Assert.AreEqual(FRGVersionControl.Core.Svn.LockState.B, info.state);
-            Assert.AreEqual("admin", info.lockOwner);
-        }
-
-        [Test]
-        public void TestParseLockInfo_T_StolenToken()
-        {
-            var info = FRGVersionControl.Core.Svn.SvnCommandRunner.ParseLockInfoFromXmlForTest(XmlT, TestPath);
-            Assert.AreEqual(FRGVersionControl.Core.Svn.LockState.T, info.state);
-            Assert.AreEqual("artist", info.lockOwner);
-        }
-
-        // -------------------------------------------------------------
-        // Phase 4 Step 0: async wrapper contracts + silence-service counters.
+        // Engine-boundary rule 1 (CLAUDE.md): the plugin never runs svn.exe directly.
         // -------------------------------------------------------------
 
         [Test]
-        public void TestRunAsync_HappyPath()
+        public void TestRun_IsAnInertDeprecatedEscapeHatch()
         {
-            // svn --version --quiet always succeeds and exits fast; safe smoke for the async path.
+#pragma warning disable CS0618
+            var result = SvnCommandRunner.Run("--version --quiet");
             var task = SvnCommandRunner.RunAsync("--version --quiet");
-            Assert.IsTrue(task.Wait(5000), "RunAsync should complete within 5s for a trivial command");
-            var result = task.Result;
-            Assert.IsTrue(result.success, $"--version --quiet should succeed; got error: {result.error}");
-        }
-
-        [Test]
-        public void TestRunAsync_CancellationBeforeStart()
-        {
-            // Pre-cancelled token should throw on await.
-            var cts = new CancellationTokenSource();
-            cts.Cancel();
-            var task = SvnCommandRunner.RunAsync("--version --quiet", ct: cts.Token);
-            // Wait throws AggregateException(TaskCanceledException) when the underlying op was cancelled.
-            Assert.Throws(typeof(AggregateException), () => task.Wait(5000));
-            Assert.IsTrue(task.IsCanceled || task.IsFaulted,
-                "Pre-cancelled RunAsync should be Canceled or Faulted, not RanToCompletion");
+#pragma warning restore CS0618
+            Assert.IsFalse(result.success, "Run must never report success");
+            Assert.AreEqual(-1, result.exitCode);
+            Assert.IsEmpty(result.output);
+            StringAssert.Contains("deprecated", result.error);
+            StringAssert.Contains("svn-core IPC", result.error);
+            Assert.IsTrue(task.IsCompleted, "RunAsync must complete synchronously");
+            Assert.IsFalse(task.Result.success);
         }
 
         [Test]

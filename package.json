@@ -1,6 +1,6 @@
 {
   "name": "com.frg.versioncontrol",
-  "version": "0.2.89",
+  "version": "0.2.90",
   "displayName": "FRG Version Control",
   "description": "Editor-only SVN-backed file-locking toolset for Unity teams. Surfaces SVN lock state in the Unity Editor, manages overrides for the lock-needs-lock workflow, runs working-copy maintenance, and integrates with TortoiseSVN.",
   "unity": "6000.0",

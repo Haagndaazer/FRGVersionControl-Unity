@@ -2528,8 +2528,7 @@ namespace FRGVersionControl.UI
 
         private async Task DoRevertAndUnlockSelectedAsync()
         {
-            // Snapshot the selected non-override rows. We need lock-state info per row so
-            // we know which to RevertAndUnlock vs which to plain Revert.
+            if (RefuseWhileExclusiveOpInFlight("reverting")) return;
             var selectedRows = m_Rows.Where(r => r.selected && !r.isOverride).ToList();
             if (selectedRows.Count == 0) return;
 
@@ -2551,85 +2550,58 @@ namespace FRGVersionControl.UI
                 "Revert & Unlock", "Cancel");
             if (!ok) return;
 
-            m_StatusBanner = $"Reverting + unlocking {selectedRows.Count} file(s)…";
+            var paths = selectedRows.Select(r => r.path).ToList();
+            m_StatusBanner = $"Reverting + unlocking {paths.Count} file(s)…";
             Repaint();
             var sw = System.Diagnostics.Stopwatch.StartNew();
-
-            // Iterate on the MAIN THREAD: RevertAndUnlockFile calls AssetDatabase.Refresh
-            // internally, which throws if invoked off the main thread. Task.Yield between
-            // iterations lets the UI repaint so the progress banner updates and the user
-            // doesn't see a frozen editor for multi-file batches.
-            int succeeded = 0;
-            int unlocked = 0;
-            var failed = new List<string>();
-            for (int i = 0; i < selectedRows.Count; i++)
+            var progress = new Progress<string>(line =>
             {
-                var r = selectedRows[i];
-                m_StatusBanner = $"Reverting + unlocking {i + 1}/{selectedRows.Count}: {System.IO.Path.GetFileName(r.path)}…";
-                Repaint();
-                try
-                {
-                    if (r.lockState == "K")
-                    {
-                        // Revert + unlock together. RevertAndUnlockFile is main-thread-safe
-                        // (calls AssetDatabase.Refresh internally) and handles both ops.
-                        bool ok2 = FileLockManager.Instance.RevertAndUnlockFile(r.path);
-                        if (ok2) { succeeded++; unlocked++; }
-                        else { failed.Add(System.IO.Path.GetFileName(r.path)); }
-                    }
-                    else
-                    {
-                        // Plain revert via SvnCommandRunner (synchronous — runs svn binary;
-                        // blocks the editor for ~tens of ms per file).
-                        var rv = SvnCommandRunner.Revert(new[] { r.path }, alsoRevertMeta: true);
-                        if (rv.success) { succeeded++; }
-                        else
-                        {
-                            Debug.LogError($"[FrgVersionControl] Revert failed for {r.path}.\n" +
-                                           $"Output:\n{rv.output}\nError:\n{rv.error}");
-                            failed.Add(System.IO.Path.GetFileName(r.path));
-                        }
-                    }
-                }
-                catch (Exception ex)
-                {
-                    Debug.LogError($"[FrgVersionControl] Revert+Unlock threw for {r.path}: {ex}");
-                    failed.Add(System.IO.Path.GetFileName(r.path));
-                }
+                m_StatusBanner = line;
+                SvnCommandRunner.s_UnityMainSync.Post(_ => { if (this != null) Repaint(); }, null);
+            });
 
-                // Yield to give the editor a frame to repaint the progress banner.
-                await Task.Yield();
+            RevertUnlockBatchResult result;
+            try
+            {
+                var manager = FileLockManager.Instance;
+                result = await Task.Run(() => manager.RevertAndUnlockFilesAsync(paths, progress));
+            }
+            catch (Exception ex)
+            {
+                sw.Stop();
+                Debug.LogError($"[FrgVersionControl] Revert+Unlock threw: {ex}");
+                FileLockOpLog.Record("revert+unlock", $"{paths.Count}-files", sw.ElapsedMilliseconds, false);
+                SetErrorBanner("Revert & Unlock failed", ex.Message + " Refresh status before retrying.");
+                Repaint();
+                return;
             }
             sw.Stop();
-            FileLockOpLog.Record("revert+unlock", $"{selectedRows.Count}-files", sw.ElapsedMilliseconds, failed.Count == 0);
+            FileLockOpLog.Record("revert+unlock", $"{paths.Count}-files", sw.ElapsedMilliseconds, result.allSucceeded);
 
-            SvnCommandRunner.s_UnityMainSync.Post(_ =>
+            FileLockManager.Instance.ApplyRevertUnlockCompletion(result);
+            foreach (var f in result.GetFailed())
             {
-                // Force a single AssetDatabase.Refresh covering the whole batch (per-file
-                // RevertAndUnlockFile already calls Refresh, but the plain-revert path does
-                // not — and a final pass ensures the UI is consistent).
-                AssetDatabase.Refresh(ImportAssetOptions.ForceUpdate);
-                if (failed.Count == 0)
-                {
-                    m_StatusBanner = unlocked > 0
-                        ? $"Reverted {succeeded} file(s); released {unlocked} lock(s)."
-                        : $"Reverted {succeeded} file(s).";
-                }
-                else
-                {
-                    string failedList = string.Join(", ", failed.Take(3));
-                    string failedSuffix = failed.Count > 3 ? $", …{failed.Count - 3} more" : "";
-                    m_StatusBanner = $"Revert+Unlock: {succeeded}/{selectedRows.Count} ok " +
-                                     $"({unlocked} unlocked). {failed.Count} failed: {failedList}{failedSuffix}. " +
-                                     "Open Console for details.";
-                }
-                _ = SvnStatusCache.RefreshAsync();
-                FileLockProjectWindowOverlay.RefreshGlobalSvnStatusCache();
-                Repaint();
-            }, null);
-        }
+                Debug.LogError($"[FrgVersionControl] {f.path}: {f.errorMessage}");
+            }
 
-        // ----- Helpers -----
+            if (result.allSucceeded)
+            {
+                m_StatusBanner = result.releasedCount > 0
+                    ? $"Reverted {result.revertedCount} file(s); released {result.releasedCount} lock(s)."
+                    : $"Reverted {result.revertedCount} file(s).";
+            }
+            else
+            {
+                var failedNames = result.GetFailed().Select(f => System.IO.Path.GetFileName(f.path)).ToList();
+                string failedList = string.Join(", ", failedNames.Take(3));
+                string failedSuffix = failedNames.Count > 3 ? $", …{failedNames.Count - 3} more" : "";
+                string unknownNote = result.unknownPaths.Count > 0 ? $" {result.unknownPaths.Count} outcome(s) unknown — refresh status." : "";
+                m_StatusBanner = $"Revert+Unlock: {result.revertedCount} reverted, {result.releasedCount} unlocked, " +
+                                 $"{result.failureCount} failed: {failedList}{failedSuffix}.{unknownNote} Open Console for details.";
+            }
+            _ = SvnStatusCache.RefreshAsync();
+            Repaint();
+        }
 
         private void CancelAndStartCts()
         {

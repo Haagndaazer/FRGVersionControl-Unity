@@ -1,4 +1,5 @@
 using System;
+using System.Threading.Tasks;
 using System.Collections.Generic;
 using System.IO;
 using UnityEngine;
@@ -117,6 +118,43 @@ namespace FRGVersionControl.Services
             s_History.entries.Add(entry);
             SaveHistory();
             TryIpcRecord("unlock", path, user, userName, machineName, forced);
+        }
+
+        /// <summary>Local-store half of a batched unlock record (main thread: the list is read
+        /// by the UI). One file write for the whole batch.</summary>
+        public static void RecordUnlocksLocal(IList<string> paths, string user, string userName, string machineName, bool forced = false)
+        {
+            if (paths == null || paths.Count == 0) return;
+            foreach (var p in paths)
+            {
+                s_History.entries.Add(new LockHistoryEntry(p, "unlock", user, userName, machineName, forced));
+            }
+            SaveHistory();
+        }
+
+        /// <summary>Core-store half of a batched unlock record: one <c>hist.record</c> request
+        /// with <c>entries[]</c> (SVN_CORE_API.md §5.10). Safe off the main thread.</summary>
+        public static async Task RecordUnlocksIpcAsync(IList<string> paths, string user, string userName, string machineName, bool forced = false)
+        {
+            if (paths == null || paths.Count == 0) return;
+            try
+            {
+                var client = FRGVersionControl.Core.FileLockManager.Instance.IpcClient;
+                if (!client.IsAvailable) return;
+                var sb = new System.Text.StringBuilder("{\"entries\":[");
+                for (int i = 0; i < paths.Count; i++)
+                {
+                    if (i > 0) sb.Append(",");
+                    sb.Append("{\"event\":\"unlock\",\"path\":\"").Append(IpcEscape(paths[i]))
+                      .Append("\",\"user\":\"").Append(IpcEscape(user ?? ""))
+                      .Append("\",\"userName\":\"").Append(IpcEscape(userName ?? ""))
+                      .Append("\",\"machineName\":\"").Append(IpcEscape(machineName ?? ""))
+                      .Append("\",\"forced\":").Append(forced ? "true" : "false").Append("}");
+                }
+                sb.Append("]}");
+                await client.InvokeRawAsync("hist.record", sb.ToString(), client.BuildDefaultContext()).ConfigureAwait(false);
+            }
+            catch { }
         }
 
         private static void TryIpcRecord(string ev, string path, string user, string userName, string machineName, bool forced)

@@ -237,4 +237,28 @@ namespace FRGVersionControl.Core
         public int revertedCount;
         public List<string> revertedPaths = new List<string>();
     }
+
+    /// <summary>Outcome of one batched revert-and-unlock (0.2.89). <c>unknownPaths</c> are
+    /// paths whose request was abandoned (still running / busy) — the user is told to refresh,
+    /// never that they failed.</summary>
+    public class RevertUnlockBatchResult
+    {
+        public List<FileOperationResult> results = new List<FileOperationResult>();
+        public List<string> revertedPaths = new List<string>();
+        public List<string> releasedPaths = new List<string>();
+        public List<string> unknownPaths = new List<string>();
+        public string unknownReason;
+
+        public int revertedCount => revertedPaths.Count;
+        public int releasedCount => releasedPaths.Count;
+        public int failureCount => results.Count(r => !r.success);
+        public bool allSucceeded => failureCount == 0 && unknownPaths.Count == 0;
+
+        public void Add(string path, bool success, string message = null)
+        {
+            results.Add(new FileOperationResult(path, success, message));
+        }
+
+        public List<FileOperationResult> GetFailed() => results.Where(r => !r.success).ToList();
+    }
 }

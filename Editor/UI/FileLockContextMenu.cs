@@ -12,6 +12,8 @@ namespace FRGVersionControl.UI
     /// </summary>
     public static class FileLockContextMenu
     {
+        private static bool s_RevertUnlockInFlight;
+
         [MenuItem("Assets/FRG Version Control/Lock File(s)", false, 2000)]
         private static void LockSelectedFiles()
         {
@@ -171,75 +173,104 @@ namespace FRGVersionControl.UI
         [MenuItem("Assets/FRG Version Control/Revert File(s)", false, 2002)]
         private static void RevertSelectedFiles()
         {
-            // Collect files with changes
-            var filesToRevert = new System.Collections.Generic.List<string>();
+            var selected = new List<string>();
             foreach (var obj in Selection.objects)
             {
                 string path = AssetDatabase.GetAssetPath(obj);
-                if (string.IsNullOrEmpty(path)) continue;
-
-                if (FRGVersionControl.Core.Svn.SvnCommandRunner.HasUncommittedChanges(path))
-                {
-                    filesToRevert.Add(path);
-                }
+                if (!string.IsNullOrEmpty(path)) selected.Add(path);
             }
+            if (selected.Count == 0) return;
 
+            var filesToRevert = FRGVersionControl.Core.Svn.SvnCommandRunner.FilterChanged(selected.ToArray());
+            if (filesToRevert == null)
+            {
+                EditorUtility.DisplayDialog("Revert Files",
+                    "Could not read SVN status for the selection. Wait for the in-progress operation to finish, then retry.", "OK");
+                return;
+            }
             if (filesToRevert.Count == 0)
             {
                 Debug.Log("[FRGVersionControl] No files with uncommitted changes to revert.");
                 return;
             }
 
-            // Show confirmation dialog
-            string fileList = string.Join("\n", filesToRevert.ConvertAll(p => "  • " + p));
+            string fileList = string.Join("\n", filesToRevert.Take(20).Select(p => "  • " + p));
+            if (filesToRevert.Count > 20) fileList += $"\n  … and {filesToRevert.Count - 20} more";
             string message = $"Revert uncommitted changes for {filesToRevert.Count} file(s)?\n\n" +
                            "This will discard all local changes and cannot be undone.\n\n" +
                            $"Files to revert:\n{fileList}";
 
-            bool confirmed = EditorUtility.DisplayDialog(
-                "Revert Files",
-                message,
-                "Revert",
-                "Cancel");
-
+            bool confirmed = EditorUtility.DisplayDialog("Revert Files", message, "Revert", "Cancel");
             if (!confirmed)
             {
                 Debug.Log("[FRGVersionControl] Revert cancelled by user.");
                 return;
             }
 
-            // Revert each file
+            var outcome = FRGVersionControl.Core.Svn.SvnCommandRunner.RevertDetailedAsync(filesToRevert.ToArray(), alsoRevertMeta: true).GetAwaiter().GetResult();
             int successCount = 0;
             foreach (string path in filesToRevert)
             {
-                bool reverted = FRGVersionControl.Core.Svn.SvnCommandRunner.Revert(new[] { path }, alsoRevertMeta: true).success;
-                if (reverted)
+                if (outcome.WasReverted(path) || outcome.IsUnchanged(path))
                 {
                     successCount++;
-                    Debug.Log($"[FRGVersionControl] Reverted: {path}");
+                }
+                else if (outcome.IsUnknown(path))
+                {
+                    Debug.LogWarning($"[FRGVersionControl] Revert outcome unknown for {path}: {outcome.unknownReason}");
                 }
                 else
                 {
-                    Debug.LogError($"[FRGVersionControl] Failed to revert: {path}");
+                    Debug.LogError($"[FRGVersionControl] Failed to revert: {path}: {outcome.FailureFor(path)?.error ?? outcome.error}");
                 }
             }
 
             AssetDatabase.Refresh();
-            Debug.Log($"[FRGVersionControl] Successfully reverted {successCount} of {filesToRevert.Count} file(s).");
+            FileLockProjectWindowOverlay.RepaintProjectWindow();
+            Debug.Log($"[FRGVersionControl] Reverted {successCount} of {filesToRevert.Count} file(s) in one batch.");
         }
 
         [MenuItem("Assets/FRG Version Control/Revert and Unlock File(s)", false, 2003)]
         private static void RevertAndUnlockSelectedFiles()
         {
+            var selected = new List<string>();
             foreach (var obj in Selection.objects)
             {
                 string path = AssetDatabase.GetAssetPath(obj);
-                if (string.IsNullOrEmpty(path)) continue;
-
-                FileLockManager.Instance.RevertAndUnlockFile(path);
+                if (!string.IsNullOrEmpty(path)) selected.Add(path);
             }
+            if (selected.Count == 0) return;
 
-            AssetDatabase.Refresh();
+            if (s_RevertUnlockInFlight)
+            {
+                Debug.LogWarning("[FRGVersionControl] A revert and unlock is already in progress. Wait for it to finish, then retry.");
+                return;
+            }
+            s_RevertUnlockInFlight = true;
+            Debug.Log($"[FRGVersionControl] Reverting and unlocking {selected.Count} file(s)…");
+            var sw = System.Diagnostics.Stopwatch.StartNew();
+            var manager = FileLockManager.Instance;
+            System.Threading.Tasks.Task.Run(() => manager.RevertAndUnlockFilesAsync(selected)).ContinueWith(t =>
+            {
+                FRGVersionControl.Core.Svn.SvnCommandRunner.s_UnityMainSync.Post(_ =>
+                {
+                    s_RevertUnlockInFlight = false;
+                    sw.Stop();
+                    FRGVersionControl.Services.FileLockOpLog.Record("revert+unlock", $"{selected.Count}-files", sw.ElapsedMilliseconds, !t.IsFaulted && t.Result.allSucceeded);
+                    if (t.IsFaulted)
+                    {
+                        Debug.LogError($"[FRGVersionControl] Revert and unlock threw: {t.Exception?.GetBaseException().Message}. Refresh status before retrying.");
+                        return;
+                    }
+                    var result = t.Result;
+                    manager.ApplyRevertUnlockCompletion(result);
+                    foreach (var f in result.GetFailed())
+                    {
+                        Debug.LogError($"[FRGVersionControl] {f.path}: {f.errorMessage}");
+                    }
+                    Debug.Log($"[FRGVersionControl] Revert and unlock: {result.revertedCount} reverted, {result.releasedCount} unlocked, {result.failureCount} failed, {result.unknownPaths.Count} unknown (one batch).");
+                }, null);
+            });
         }
 
         [MenuItem("Assets/FRG Version Control/View Lock Info", false, 2004)]

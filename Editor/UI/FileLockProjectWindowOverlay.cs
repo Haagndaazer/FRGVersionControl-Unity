@@ -284,6 +284,23 @@ namespace FRGVersionControl.UI
             return SvnFileStatus.None;
         }
 
+        private static bool s_RefreshScheduled;
+
+        /// <summary>Coalesces overlay cache refreshes to one per editor tick. Unity invokes
+        /// OnWillSaveAssets once per asset while it generates .meta files during a reimport, so
+        /// a synchronous refresh there ran one full `svn status` per imported file.</summary>
+        public static void ScheduleRefreshGlobalSvnStatusCache()
+        {
+            if (s_RefreshScheduled) return;
+            s_RefreshScheduled = true;
+            EditorApplication.delayCall += () =>
+            {
+                s_RefreshScheduled = false;
+                try { RefreshGlobalSvnStatusCache(); }
+                catch (System.Exception ex) { Debug.LogWarning($"[FRGVersionControl] deferred status refresh failed: {ex.Message}"); }
+            };
+        }
+
         /// <summary>
         /// Refresh the global git status cache by running a single git status command
         /// This is called automatically on startup and when RepaintProjectWindow() is called

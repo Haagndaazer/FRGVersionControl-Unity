@@ -28,53 +28,10 @@ namespace FRGVersionControl.Tests
     {
         private const string ProbeFile = "Assets/slow-commit-probe.txt";
 
-        private static string Norm(string p) => (p ?? "").Replace('\\', '/').TrimEnd('/');
-
-        private static bool ScratchGuard(out string reason)
-        {
-            var root = Norm(SvnCommandRunner.ProjectRoot);
-            var env = Norm(Environment.GetEnvironmentVariable("FRG_SLOW_COMMIT_WC"));
-            if (string.IsNullOrEmpty(env) || !string.Equals(env, root, StringComparison.OrdinalIgnoreCase))
-            {
-                reason = "FRG_SLOW_COMMIT_WC is not this project root";
-                return false;
-            }
-            if (!File.Exists(Path.Combine(root, ".frg-scratch-wc")))
-            {
-                reason = ".frg-scratch-wc marker missing";
-                return false;
-            }
-            var client = FileLockManager.Instance.IpcClient;
-            if (!client.IsAvailable) { reason = "svn-core.exe unavailable"; return false; }
-            var info = client.InvokeRawAsync("meta.info", "{\"path\":\".\"}", client.BuildDefaultContext()).GetAwaiter().GetResult();
-            var m = info.Ok ? Regex.Match(info.RawLine ?? "", "\"url\":\"([^\"]+)\"") : null;
-            var url = m != null && m.Success ? m.Groups[1].Value : "";
-            var temp = Norm(Path.GetTempPath());
-            if (!url.StartsWith("file:///", StringComparison.OrdinalIgnoreCase) ||
-                url.IndexOf(temp, StringComparison.OrdinalIgnoreCase) < 0)
-            {
-                reason = "working copy is not a file:/// repository under the temp directory: " + url;
-                return false;
-            }
-            reason = null;
-            return true;
-        }
-
-        private static long HeadRevision()
-        {
-            var client = FileLockManager.Instance.IpcClient;
-            var local = client.InvokeRawAsync("meta.info", "{\"path\":\".\"}", client.BuildDefaultContext()).GetAwaiter().GetResult();
-            var urlMatch = Regex.Match(local.RawLine ?? "", "\"url\":\"([^\"]+)\"");
-            if (!urlMatch.Success) return -1;
-            var head = client.InvokeRawAsync("meta.info", "{\"url\":\"" + urlMatch.Groups[1].Value + "\"}", client.BuildDefaultContext()).GetAwaiter().GetResult();
-            var m = Regex.Match(head.RawLine ?? "", "\"revision\":(\\d+)");
-            return m.Success ? long.Parse(m.Groups[1].Value) : -1;
-        }
-
         [UnityTest]
         public IEnumerator SlowCommit_IsNeverKilledOrResent_ReadsFailFast_ThenRecover()
         {
-            if (!ScratchGuard(out var reason))
+            if (!ScratchWcGuard.IsScratch(out var reason))
             {
                 Assert.Ignore("scratch guard: " + reason);
                 yield break;
@@ -89,7 +46,7 @@ namespace FRGVersionControl.Tests
             {
                 var full = Path.Combine(SvnCommandRunner.ProjectRoot, ProbeFile);
                 File.AppendAllText(full, "slow commit " + DateTime.UtcNow.ToString("o") + "\n");
-                long before = HeadRevision();
+                long before = ScratchWcGuard.HeadRevision();
                 Assert.GreaterOrEqual(before, 1, "scratch repo must have a seed revision");
 
                 var commit = SvnCommandRunner.CommitAsync(new[] { ProbeFile }, "slow commit test", CancellationToken.None, new Progress<string>(progressLines.Add));
@@ -114,7 +71,7 @@ namespace FRGVersionControl.Tests
                 Assert.IsTrue(result.success, "commit failed: " + result.error);
                 Assert.Greater(elapsed, 5.0, "the scratch pre-commit hook must make the commit outlive the old 5 s budget");
                 Assert.AreEqual(before + 1, result.revision, "exactly one new revision expected from the commit result");
-                Assert.AreEqual(before + 1, HeadRevision(), "exactly one new revision expected in the repository");
+                Assert.AreEqual(before + 1, ScratchWcGuard.HeadRevision(), "exactly one new revision expected in the repository");
                 Assert.IsFalse(IpcSvnClient.IsExclusiveOpInFlight, "exclusive flag must clear on the terminal frame");
 
                 Assert.IsNotEmpty(refreshes, "at least one refresh should have run while the commit was in flight");

@@ -357,19 +357,198 @@ namespace FRGVersionControl.Core.Svn
         {
             if (paths == null || paths.Length == 0)
                 throw new ArgumentException("paths must be non-empty", nameof(paths));
-            var allPaths = new List<string>(paths);
-            if (alsoRevertMeta)
+            return ExecuteIpcGeneric("mutate.revert", ExpandMetaSiblings(paths, alsoRevertMeta).ToArray(), null);
+        }
+
+        private static List<string> ExpandMetaSiblings(IEnumerable<string> paths, bool alsoRevertMeta)
+        {
+            var allPaths = new List<string>();
+            var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            foreach (var p in paths)
             {
-                foreach (var p in paths)
+                if (string.IsNullOrWhiteSpace(p) || !seen.Add(p)) continue;
+                allPaths.Add(p);
+                if (!alsoRevertMeta || p.EndsWith(".meta", StringComparison.OrdinalIgnoreCase)) continue;
+                var meta = p + ".meta";
+                var fullMeta = Path.IsPathRooted(meta) ? meta : Path.Combine(ProjectRoot, meta);
+                if (File.Exists(fullMeta) && seen.Add(meta)) allPaths.Add(meta);
+            }
+            return allPaths;
+        }
+
+        private static string PathsJson(IEnumerable<string> paths, string extraJson = null)
+        {
+            var sb = new StringBuilder("{\"paths\":[");
+            bool first = true;
+            foreach (var p in paths)
+            {
+                if (!first) sb.Append(",");
+                first = false;
+                sb.Append("\"").Append(IpcEscape(p)).Append("\"");
+            }
+            sb.Append("]");
+            if (!string.IsNullOrEmpty(extraJson)) sb.Append(",").Append(extraJson);
+            sb.Append("}");
+            return sb.ToString();
+        }
+
+        /// <summary>Batched revert with per-path outcomes (0.2.89): one <c>mutate.revert</c> per
+        /// chunk of <see cref="BatchOutcomes.ChunkSize"/> targets (after .meta expansion).
+        /// Never raises for a per-path problem; an abandoned chunk lands in <c>unknown</c>.</summary>
+        public static async Task<RevertOutcome> RevertDetailedAsync(string[] paths, bool alsoRevertMeta = true)
+        {
+            if (paths == null || paths.Length == 0)
+                throw new ArgumentException("paths must be non-empty", nameof(paths));
+            var outcome = new RevertOutcome();
+            var client = FRGVersionControl.Core.FileLockManager.Instance.IpcClient;
+            if (!client.IsAvailable)
+            {
+                outcome.success = false;
+                outcome.error = IpcUnavailable("mutate.revert").error;
+                return outcome;
+            }
+            var distinct = paths.Where(p => !string.IsNullOrWhiteSpace(p)).Distinct(StringComparer.OrdinalIgnoreCase).ToList();
+            foreach (var assetChunk in BatchOutcomes.Chunk(distinct, BatchOutcomes.ChunkSize / 2))
+            {
+                var chunk = ExpandMetaSiblings(assetChunk, alsoRevertMeta).ToArray();
+                FRGVersionControl.Core.IpcClient.IpcRawResult raw;
+                try
                 {
-                    if (string.IsNullOrEmpty(p)) continue;
-                    if (p.EndsWith(".meta", StringComparison.OrdinalIgnoreCase)) continue;
-                    var meta = p + ".meta";
-                    var fullMeta = Path.IsPathRooted(meta) ? meta : Path.Combine(ProjectRoot, meta);
-                    if (File.Exists(fullMeta) && !allPaths.Contains(meta)) allPaths.Add(meta);
+                    raw = await client.InvokeRawAsync("mutate.revert", PathsJson(chunk), client.BuildDefaultContext()).ConfigureAwait(false);
+                }
+                catch (Exception ex)
+                {
+                    raw = new FRGVersionControl.Core.IpcClient.IpcRawResult { Op = "mutate.revert", Ok = false, ErrorKind = "protocol", ErrorMessage = ex.Message, ErrorDefaultAction = "Refresh status before retrying." };
+                }
+                if (raw.Ok)
+                {
+                    int before = outcome.reverted.Count + outcome.failed.Count + outcome.unchanged.Count;
+                    BatchOutcomes.MergeRevert(outcome, raw.RawLine);
+                    int attributed = outcome.reverted.Count + outcome.failed.Count + outcome.unchanged.Count - before;
+                    Debug.Log($"[SvnCommandRunner] revert chunk: {chunk.Length} targets → {attributed} attributed ({outcome.reverted.Count} reverted so far, {outcome.failed.Count} failed, {outcome.unchanged.Count} unchanged)");
+                }
+                else if (raw.StillRunning || raw.Busy)
+                {
+                    outcome.unknown.AddRange(chunk);
+                    outcome.unknownReason = FormatIpcError(raw, "mutate.revert");
+                    Debug.LogWarning($"[SvnCommandRunner] revert chunk of {chunk.Length} abandoned: {outcome.unknownReason}");
+                }
+                else
+                {
+                    outcome.success = false;
+                    outcome.error = FormatIpcError(raw, "mutate.revert");
+                    var perPath = BatchOutcomes.ParseErrorPerPath(raw.RawLine);
+                    foreach (var p in chunk)
+                    {
+                        var hit = perPath.FirstOrDefault(f => BatchOutcomes.PathsMatch(f.path, p));
+                        outcome.failed.Add(new RevertFailure { path = p, error = hit != null ? hit.line + " Check the path and retry." : outcome.error });
+                    }
                 }
             }
-            return ExecuteIpcGeneric("mutate.revert", allPaths.ToArray(), null);
+            return outcome;
+        }
+
+        /// <summary>Batched unlock with per-path outcomes (0.2.89): one <c>lock.release</c> per
+        /// chunk. Never raises for a per-path problem; an abandoned chunk lands in <c>unknown</c>.</summary>
+        public static async Task<UnlockOutcome> UnlockDetailedAsync(string[] paths, bool force = false)
+        {
+            if (paths == null || paths.Length == 0)
+                throw new ArgumentException("paths must be non-empty", nameof(paths));
+            var outcome = new UnlockOutcome();
+            var client = FRGVersionControl.Core.FileLockManager.Instance.IpcClient;
+            if (!client.IsAvailable)
+            {
+                outcome.success = false;
+                outcome.error = IpcUnavailable("lock.release").error;
+                return outcome;
+            }
+            foreach (var chunk in BatchOutcomes.Chunk(paths, BatchOutcomes.ChunkSize / 2))
+            {
+                FRGVersionControl.Core.IpcClient.IpcRawResult raw;
+                try
+                {
+                    raw = await client.InvokeRawAsync("lock.release", PathsJson(chunk, force ? "\"force\":true" : null), client.BuildDefaultContext()).ConfigureAwait(false);
+                }
+                catch (Exception ex)
+                {
+                    raw = new FRGVersionControl.Core.IpcClient.IpcRawResult { Op = "lock.release", Ok = false, ErrorKind = "protocol", ErrorMessage = ex.Message, ErrorDefaultAction = "Refresh status before retrying." };
+                }
+                if (raw.Ok)
+                {
+                    int before = outcome.released.Count;
+                    BatchOutcomes.MergeUnlock(outcome, raw.RawLine);
+                    Debug.Log($"[SvnCommandRunner] unlock chunk: {chunk.Length} targets → {outcome.released.Count - before} released, {outcome.failed.Count} failed so far");
+                }
+                else if (raw.StillRunning || raw.Busy)
+                {
+                    outcome.unknown.AddRange(chunk);
+                    outcome.unknownReason = FormatIpcError(raw, "lock.release");
+                    Debug.LogWarning($"[SvnCommandRunner] unlock chunk of {chunk.Length} abandoned: {outcome.unknownReason}");
+                }
+                else
+                {
+                    outcome.success = false;
+                    outcome.error = FormatIpcError(raw, "lock.release");
+                    var perPath = BatchOutcomes.ParseErrorPerPath(raw.RawLine);
+                    foreach (var p in chunk)
+                    {
+                        var hit = perPath.FirstOrDefault(f => BatchOutcomes.PathsMatch(f.path, p));
+                        outcome.failed.Add(hit != null ? new UnlockFailure { path = p, svnCode = hit.svnCode, line = hit.line } : new UnlockFailure { path = p, svnCode = null, line = outcome.error });
+                    }
+                }
+            }
+            return outcome;
+        }
+
+        /// <summary>One <c>status.query</c> for many paths; <c>null</c> when the core is busy or
+        /// the read failed. Keys use forward slashes; a path absent from the map has no status
+        /// (unmodified).</summary>
+        public static Dictionary<string, SvnStatusEntry> StatusMany(string[] paths)
+        {
+            if (paths == null || paths.Length == 0) return new Dictionary<string, SvnStatusEntry>();
+            try
+            {
+                var client = FRGVersionControl.Core.FileLockManager.Instance.IpcClient;
+                if (!client.IsAvailable) return null;
+                var r = client.TryStatusQueryAsync(paths).GetAwaiter().GetResult();
+                if (r.Ok) return r.Value;
+                Debug.LogWarning($"[SvnCommandRunner] StatusMany {(r.Busy ? "skipped" : "failed")}: {r.Error}");
+                return null;
+            }
+            catch (Exception ex)
+            {
+                Debug.LogWarning($"[SvnCommandRunner] StatusMany failed: {ex.Message}");
+                return null;
+            }
+        }
+
+        public static bool IsChangedStatus(SvnFileStatus status)
+        {
+            switch (status)
+            {
+                case SvnFileStatus.Modified:
+                case SvnFileStatus.Added:
+                case SvnFileStatus.Deleted:
+                case SvnFileStatus.Replaced:
+                case SvnFileStatus.Conflict:
+                    return true;
+                default:
+                    return false;
+            }
+        }
+
+        /// <summary>The subset of <paramref name="paths"/> with uncommitted changes, from one
+        /// status query. Returns null when status is unavailable.</summary>
+        public static List<string> FilterChanged(string[] paths)
+        {
+            var map = StatusMany(paths);
+            if (map == null) return null;
+            var changed = new List<string>();
+            foreach (var p in paths)
+            {
+                if (map.TryGetValue((p ?? "").Replace('\\', '/'), out var e) && IsChangedStatus(e.status)) changed.Add(p);
+            }
+            return changed;
         }
 
         public static SvnResult Add(string[] paths)

@@ -1,4 +1,5 @@
 using System;
+using System.Threading.Tasks;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
@@ -617,43 +618,119 @@ namespace FRGVersionControl.Core
         public bool RevertAndUnlockFile(string assetPath)
         {
             if (!m_Initialized) return false;
-
-            // Check if file is locked by current user
             if (!IsLockedByMe(assetPath))
             {
                 Debug.LogWarning($"[FRGVersionControl] Cannot revert and unlock - file is not locked by you: {assetPath}");
                 return false;
             }
-
-            // Check if file has uncommitted changes
-            bool hasChanges = SvnCommandRunner.HasUncommittedChanges(assetPath);
-
-            if (hasChanges)
+            var result = RevertAndUnlockFilesAsync(new[] { assetPath }).GetAwaiter().GetResult();
+            ApplyRevertUnlockCompletion(result);
+            foreach (var f in result.GetFailed())
             {
-                bool reverted = SvnCommandRunner.Revert(new[] { assetPath }, alsoRevertMeta: true).success;
-                if (!reverted)
+                Debug.LogError($"[FRGVersionControl] Revert and unlock failed for {f.path}: {f.errorMessage}");
+            }
+            return result.allSucceeded;
+        }
+
+        /// <summary>
+        /// Batched revert-and-unlock (0.2.89): one <c>mutate.revert</c> for every path (plus
+        /// .meta siblings), one <c>lock.release</c> for the paths the lock cache says are mine
+        /// AND whose revert succeeded or was unchanged, one history record, one lock-cache
+        /// refresh. IPC only — safe off the main thread; the caller runs
+        /// <see cref="ApplyRevertUnlockCompletion"/> on the main thread afterwards.
+        /// </summary>
+        public async Task<RevertUnlockBatchResult> RevertAndUnlockFilesAsync(IList<string> assetPaths, IProgress<string> progress = null)
+        {
+            var result = new RevertUnlockBatchResult();
+            if (assetPaths == null || assetPaths.Count == 0) return result;
+            if (!m_Initialized)
+            {
+                foreach (var p in assetPaths) result.Add(p, false, "File locking not initialized. Run the Setup Wizard, then retry.");
+                return result;
+            }
+
+            var lockedByMe = new HashSet<string>(assetPaths.Where(IsLockedByMe), StringComparer.OrdinalIgnoreCase);
+            progress?.Report($"Reverting {assetPaths.Count} file(s)…");
+            var revert = await SvnCommandRunner.RevertDetailedAsync(assetPaths.ToArray(), alsoRevertMeta: true).ConfigureAwait(false);
+
+            var toUnlock = assetPaths.Where(p => lockedByMe.Contains(p) && !revert.IsUnknown(p) && revert.FailureFor(p) == null
+                                                 && (revert.success || revert.WasReverted(p) || revert.IsUnchanged(p))).ToList();
+            UnlockOutcome unlock = null;
+            Debug.Log($"[FRGVersionControl] revert+unlock batch: {assetPaths.Count} path(s), {lockedByMe.Count} locked by me, revert reverted={revert.reverted.Count} failed={revert.failed.Count} unchanged={revert.unchanged.Count} unknown={revert.unknown.Count}, unlocking {toUnlock.Count}");
+            if (toUnlock.Count > 0)
+            {
+                progress?.Report($"Releasing {toUnlock.Count} lock(s)…");
+                unlock = await SvnCommandRunner.UnlockDetailedAsync(toUnlock.ToArray(), force: false).ConfigureAwait(false);
+            }
+
+            foreach (var p in assetPaths)
+            {
+                if (revert.IsUnknown(p))
                 {
-                    Debug.LogError($"[FRGVersionControl] Failed to revert file: {assetPath}");
-                    return false;
+                    result.unknownPaths.Add(p);
+                    result.unknownReason = revert.unknownReason;
+                    result.Add(p, false, "Outcome unknown: " + revert.unknownReason);
+                    continue;
                 }
+                var rf = revert.FailureFor(p);
+                if (rf != null)
+                {
+                    result.Add(p, false, "Revert failed: " + rf.error);
+                    continue;
+                }
+                if (!revert.success && !revert.WasReverted(p) && !revert.IsUnchanged(p))
+                {
+                    result.Add(p, false, "Revert failed: " + (revert.error ?? "no response for this path. Refresh status before retrying."));
+                    continue;
+                }
+                if (revert.WasReverted(p)) result.revertedPaths.Add(p);
 
-                Debug.Log($"[FRGVersionControl] Reverted changes for: {assetPath}");
-                AssetDatabase.Refresh();
+                if (!lockedByMe.Contains(p))
+                {
+                    result.Add(p, true, "Reverted; was not locked by you");
+                    continue;
+                }
+                if (unlock != null && unlock.WasReleased(p))
+                {
+                    result.releasedPaths.Add(p);
+                    result.Add(p, true);
+                    continue;
+                }
+                if (unlock != null && unlock.IsUnknown(p))
+                {
+                    result.unknownPaths.Add(p);
+                    result.unknownReason = unlock.unknownReason;
+                    result.Add(p, false, "Reverted; lock outcome unknown: " + unlock.unknownReason);
+                    continue;
+                }
+                var uf = unlock?.FailureFor(p);
+                var detail = uf != null ? uf.line : (unlock?.error ?? "no response for this path.");
+                var suffix = detail.TrimEnd().EndsWith(".") && detail.Contains("Refresh status") ? "" : " Refresh status and retry the unlock.";
+                result.Add(p, false, $"Reverted, but the lock was not released: {detail}{suffix}");
             }
-            else
+
+            if (result.releasedPaths.Count > 0)
             {
-                Debug.Log($"[FRGVersionControl] No changes to revert for: {assetPath}");
+                await FileLockHistoryService.RecordUnlocksIpcAsync(result.releasedPaths, m_UserEmail, m_UserName, m_MachineName, false).ConfigureAwait(false);
             }
+            RefreshLockCache();
+            return result;
+        }
 
-            // Unlock the file (skip revert dialog since we already reverted)
-            bool unlocked = UnlockFile(assetPath, force: false, skipRevertDialog: true);
-            if (!unlocked)
+        /// <summary>Main-thread completion for <see cref="RevertAndUnlockFilesAsync"/>: local
+        /// history write, asset reimport, Project-window repaint.</summary>
+        public void ApplyRevertUnlockCompletion(RevertUnlockBatchResult result)
+        {
+            if (result == null) return;
+            if (result.releasedPaths.Count > 0)
             {
-                Debug.LogError($"[FRGVersionControl] Failed to unlock file after revert: {assetPath}");
-                return false;
+                FileLockHistoryService.RecordUnlocksLocal(result.releasedPaths, m_UserEmail, m_UserName, m_MachineName, false);
             }
-
-            return true;
+            if (result.revertedPaths.Count > 0)
+            {
+                AssetDatabase.Refresh(ImportAssetOptions.ForceUpdate);
+            }
+            FileLockProjectWindowOverlay.RepaintProjectWindow();
         }
 
         /// <summary>
@@ -790,14 +867,19 @@ namespace FRGVersionControl.Core
                 }
 
                 filesToUnlock.Add((assetPath, existingLock));
+            }
 
-                if (!skipRevertDialog && (isLockedByMe || force))
+            if (!skipRevertDialog && filesToUnlock.Count > 0)
+            {
+                var changed = SvnCommandRunner.FilterChanged(filesToUnlock.Select(f => f.path).ToArray());
+                if (changed == null)
                 {
-                    if (SvnCommandRunner.HasUncommittedChanges(assetPath))
-                    {
-                        filesWithChanges.Add(assetPath);
-                    }
+                    EditorUtility.DisplayDialog("Unlock Files",
+                        "Could not read SVN status for the selection. Wait for the in-progress operation to finish, then retry.", "OK");
+                    foreach (var (path, _) in filesToUnlock) result.AddResult(path, false, "Unlock skipped: SVN status unavailable. Retry after the in-progress operation finishes.");
+                    return result;
                 }
+                filesWithChanges.AddRange(changed);
             }
 
             // Unauthorized files
@@ -840,20 +922,20 @@ namespace FRGVersionControl.Core
             }
 
             // Revert if requested
-            if (revertChanges)
+            if (revertChanges && filesWithChanges.Count > 0)
             {
+                var revert = SvnCommandRunner.RevertDetailedAsync(filesWithChanges.ToArray(), alsoRevertMeta: true).GetAwaiter().GetResult();
                 foreach (var path in filesWithChanges)
                 {
-                    bool reverted = SvnCommandRunner.Revert(new[] { path }, alsoRevertMeta: true).success;
-                    if (reverted)
+                    if (revert.WasReverted(path))
                     {
                         result.revertedPaths.Add(path);
                         result.revertedCount++;
-                        Debug.Log($"[FRGVersionControl] Reverted changes for: {path}");
                     }
                     else
                     {
-                        Debug.LogError($"[FRGVersionControl] Failed to revert file: {path}");
+                        var rf = revert.FailureFor(path);
+                        Debug.LogError($"[FRGVersionControl] Failed to revert file: {path}: {rf?.error ?? revert.unknownReason ?? revert.error}");
                     }
                 }
 
@@ -863,29 +945,34 @@ namespace FRGVersionControl.Core
                 }
             }
 
-            // Iterate per-file unlock
-            int successCount = 0;
+            var unlock = SvnCommandRunner.UnlockDetailedAsync(filesToUnlock.Select(f => f.path).ToArray(), force: force).GetAwaiter().GetResult();
+            var released = new List<string>();
             foreach (var (assetPath, existingLock) in filesToUnlock)
             {
-                var unlockResult = SvnCommandRunner.Unlock(new[] { assetPath }, force: force);
-                if (unlockResult.success)
+                if (unlock.WasReleased(assetPath))
                 {
                     result.AddResult(assetPath, true);
-                    FileLockHistoryService.RecordUnlock(assetPath, m_UserEmail, m_UserName, m_MachineName, force);
-                    successCount++;
+                    released.Add(assetPath);
+                }
+                else if (unlock.IsUnknown(assetPath))
+                {
+                    result.AddResult(assetPath, false, "Outcome unknown: " + unlock.unknownReason);
                 }
                 else
                 {
+                    var uf = unlock.FailureFor(assetPath);
                     result.AddResult(assetPath, false,
-                        $"Failed to release SVN lock: {(string.IsNullOrEmpty(unlockResult.error) ? unlockResult.output : unlockResult.error)}");
+                        $"Failed to release SVN lock: {uf?.line ?? unlock.error ?? "no response for this path"} Refresh status and retry.");
                 }
             }
 
-            if (successCount > 0)
+            if (released.Count > 0)
             {
+                FileLockHistoryService.RecordUnlocksLocal(released, m_UserEmail, m_UserName, m_MachineName, force);
+                FileLockHistoryService.RecordUnlocksIpcAsync(released, m_UserEmail, m_UserName, m_MachineName, force).GetAwaiter().GetResult();
                 RefreshLockCache();
                 FileLockProjectWindowOverlay.RepaintProjectWindow();
-                Debug.Log($"[FRGVersionControl] Batch unlocked {successCount} file(s) (best-effort)");
+                Debug.Log($"[FRGVersionControl] Batch unlocked {released.Count} file(s) (best-effort)");
             }
 
             return result;

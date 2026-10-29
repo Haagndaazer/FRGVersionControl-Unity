@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Concurrent;
 using System.Diagnostics;
 using System.IO;
 using System.Text;
@@ -167,6 +168,16 @@ namespace FRGVersionControl.Core.IpcClient
 
         public bool IsAvailable => m_Process != null && m_Process.IsAvailable;
 
+        /// <summary>Per-op request counts, test diagnostics only (batch tests assert one
+        /// request per verb).</summary>
+        internal static readonly ConcurrentDictionary<string, int> RequestCounts = new ConcurrentDictionary<string, int>();
+
+        internal static int RequestCount(string op) => RequestCounts.TryGetValue(op, out var n) ? n : 0;
+
+        /// <summary>Set FRG_IPC_TRACE=&lt;op&gt; in the editor's environment to log a stack trace per
+        /// request of that op (diagnosing refresh storms).</summary>
+        private static readonly string s_TraceOp = Environment.GetEnvironmentVariable("FRG_IPC_TRACE");
+
         public string ResolveBinaryPath() => m_Process != null ? m_Process.ResolveBinaryPath() : null;
 
         public IpcRequestContext BuildDefaultContext(string username = null)
@@ -204,6 +215,8 @@ namespace FRGVersionControl.Core.IpcClient
             if (ctx == null) ctx = BuildDefaultContext();
 
             var id = "u" + Interlocked.Increment(ref m_RequestCounter).ToString();
+            RequestCounts.AddOrUpdate(op, 1, (_, c) => c + 1);
+            if (s_TraceOp != null && s_TraceOp == op) m_Logger?.Info("IPC trace " + op + " " + Environment.StackTrace);
             var ctxJson = JsonUtility.ToJson(ctx);
             // Hand-build the envelope so we can splat args as a pre-serialized JSON fragment.
             var requestJson = "{\"v\":1,\"id\":\"" + id + "\",\"op\":\"" + op + "\",\"ctx\":" +
@@ -509,6 +522,38 @@ namespace FRGVersionControl.Core.IpcClient
         {
             var r = await TryGetAllStatusEntriesAsync(ct).ConfigureAwait(false);
             return r.Ok ? r.Value : null;
+        }
+
+        /// <summary>One <c>status.query</c> for many paths (the batch replacement for per-path
+        /// HasUncommittedChanges loops). Keys are normalised to forward slashes.</summary>
+        public async Task<IpcMapResult<System.Collections.Generic.Dictionary<string, FRGVersionControl.Core.Svn.SvnStatusEntry>>>
+            TryStatusQueryAsync(string[] paths, CancellationToken ct = default)
+        {
+            var r = new IpcMapResult<System.Collections.Generic.Dictionary<string, FRGVersionControl.Core.Svn.SvnStatusEntry>>();
+            if (!IsAvailable) { r.Error = "svn-core.exe is not available"; return r; }
+            try
+            {
+                var args = new System.Text.StringBuilder("{\"paths\":[");
+                for (int i = 0; i < paths.Length; i++)
+                {
+                    if (i > 0) args.Append(",");
+                    args.Append("\"").Append(EscapeJsonString(paths[i])).Append("\"");
+                }
+                args.Append("]}");
+                var result = await InvokeRawAsync("status.query", args.ToString(), BuildDefaultContext(), ct).ConfigureAwait(false);
+                return r.From(result, raw =>
+                {
+                    var map = ParseStatusMap(raw);
+                    var normalized = new System.Collections.Generic.Dictionary<string, FRGVersionControl.Core.Svn.SvnStatusEntry>(StringComparer.OrdinalIgnoreCase);
+                    foreach (var kv in map) normalized[(kv.Key ?? "").Replace('\\', '/')] = kv.Value;
+                    return normalized;
+                });
+            }
+            catch (Exception ex)
+            {
+                r.Error = ex.Message;
+                return r;
+            }
         }
 
         public async Task<IpcMapResult<System.Collections.Generic.Dictionary<string, FRGVersionControl.Core.Svn.SvnStatusEntry>>>

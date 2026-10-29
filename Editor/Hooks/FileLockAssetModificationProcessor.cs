@@ -309,10 +309,8 @@ namespace FRGVersionControl.Hooks
                 ShowSuccessSummary(successResults);
             }
 
-            // Refresh git status cache after save operations
-            FileLockProjectWindowOverlay.RefreshGlobalSvnStatusCache();
+            FileLockProjectWindowOverlay.ScheduleRefreshGlobalSvnStatusCache();
 
-            // Return only the saveable paths (partial save)
             return saveablePaths.ToArray();
         }
 

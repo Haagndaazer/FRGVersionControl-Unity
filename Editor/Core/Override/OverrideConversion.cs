@@ -94,12 +94,13 @@ namespace FRGVersionControl.Core.OverrideMode
 
             // Step 4 (auto): lock auto-releases on commit by default. No explicit unlock needed.
 
-            // Step 5: drop the override registry entry. Use direct sidecar mutation since
-            // ClearIgnoreOnCommit would attempt to revert — but we want to KEEP our committed changes.
-            OverrideRegistryStore.WithLock(entries =>
+            // Step 5: drop the override registry entry without touching the file (override.forget):
+            // ClearIgnoreOnCommit would revert, but the committed changes must stay.
+            if (!FileLockOverrideManager.Instance.Forget(assetPath, out var forgetError))
             {
-                entries.RemoveAll(e => e.path == assetPath);
-            });
+                Debug.LogWarning($"[FRGVersionControl.IgnoreOnCommit] Convert: committed, but the override entry for " +
+                                 $"'{assetPath}' could not be removed: {forgetError}");
+            }
 
             // Refresh + repaint
             FileLockManager.Instance.RefreshLockCache();

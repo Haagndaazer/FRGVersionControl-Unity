@@ -31,12 +31,12 @@ namespace FRGVersionControl.Core
 
         public DateTime GetLockedAtTime()
         {
-            return DateTime.Parse(lockedAt).ToUniversalTime();
+            return DateTime.Parse(lockedAt, System.Globalization.CultureInfo.InvariantCulture, System.Globalization.DateTimeStyles.RoundtripKind).ToUniversalTime();
         }
 
         public DateTime GetLockedAtTimeLocal()
         {
-            return DateTime.Parse(lockedAt).ToLocalTime();
+            return DateTime.Parse(lockedAt, System.Globalization.CultureInfo.InvariantCulture, System.Globalization.DateTimeStyles.RoundtripKind).ToLocalTime();
         }
 
         public bool IsStale(int staleThresholdHours = 24)
@@ -58,7 +58,8 @@ namespace FRGVersionControl.Core
 
         public FileLock FindLock(string path)
         {
-            return locks.Find(l => l.path == path);
+            var key = PathKey.Normalize(path);
+            return locks.Find(l => PathKey.Comparer.Equals(l.path, key));
         }
 
         public bool IsLockedByUser(string path, string userEmail, string machineName)
@@ -86,13 +87,15 @@ namespace FRGVersionControl.Core
         public void AddLock(FileLock fileLock)
         {
             // Remove existing lock for same path if present
-            locks.RemoveAll(l => l.path == fileLock.path);
+            fileLock.path = PathKey.Normalize(fileLock.path);
+            locks.RemoveAll(l => PathKey.Comparer.Equals(l.path, fileLock.path));
             locks.Add(fileLock);
         }
 
         public bool RemoveLock(string path)
         {
-            return locks.RemoveAll(l => l.path == path) > 0;
+            var key = PathKey.Normalize(path);
+            return locks.RemoveAll(l => PathKey.Comparer.Equals(l.path, key)) > 0;
         }
 
         public string ToJson()
@@ -137,7 +140,7 @@ namespace FRGVersionControl.Core
                 // SVN's status -u --xml emits paths with backslashes on Windows
                 // (e.g., "Assets\Scenes\Foo.mat"). Unity Asset paths are always forward-slash.
                 // Normalize at parse time so FindLock(unityAssetPath) matches.
-                var canonicalPath = (kv.Key ?? "").Replace('\\', '/');
+                var canonicalPath = PathKey.Normalize(kv.Key);
 
                 var fl = new FileLock(
                     path: canonicalPath,

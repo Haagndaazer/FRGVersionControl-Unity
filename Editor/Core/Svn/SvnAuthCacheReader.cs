@@ -66,7 +66,7 @@ namespace FRGVersionControl.Core.Svn
                     var entry = ParseEntry(file);
                     if (entry == null) continue;
                     string realm = entry.Get("svn:realmstring") ?? "";
-                    if (!realm.Contains(hostPort)) continue;
+                    if (realm.IndexOf(hostPort, StringComparison.OrdinalIgnoreCase) < 0) continue;
 
                     string username = entry.Get("username");
                     if (string.IsNullOrEmpty(username)) continue;
@@ -108,7 +108,8 @@ namespace FRGVersionControl.Core.Svn
                 int port = uri.Port;
                 if (port < 0)
                 {
-                    port = uri.Scheme == "https" ? 443 : 80;
+                    port = DefaultPort(uri.Scheme);
+                    if (port < 0) port = 80;
                 }
                 return $"<{uri.Scheme}://{uri.Host}:{port}>";
             }
@@ -116,6 +117,26 @@ namespace FRGVersionControl.Core.Svn
             {
                 return null;
             }
+        }
+
+        /// <summary>Default port of a scheme whose credentials svn keeps in svn.simple; -1 for
+        /// schemes that never use it (file://, svn+ssh://).</summary>
+        public static int DefaultPort(string scheme)
+        {
+            switch ((scheme ?? "").ToLowerInvariant())
+            {
+                case "https": return 443;
+                case "http": return 80;
+                case "svn": return 3690;
+                default: return -1;
+            }
+        }
+
+        /// <summary>True when the repository URL's scheme stores passwords in svn.simple.</summary>
+        public static bool UsesPasswordCache(string repoUrl)
+        {
+            try { return DefaultPort(new Uri(repoUrl).Scheme) > 0; }
+            catch { return false; }
         }
 
         private class CacheEntry

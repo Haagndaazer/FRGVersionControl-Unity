@@ -524,7 +524,13 @@ namespace FRGVersionControl.Hooks
             // atomically. Returning DidMove tells Unity to skip its own OS-level rename
             // (the file is already at destination). For unversioned files, fall through to
             // DidNotMove and let Unity rename via OS.
-            if (!FRGVersionControl.Core.Svn.SvnCommandRunner.IsVersioned(sourcePath))
+            var sourceState = FRGVersionControl.Core.Svn.SvnCommandRunner.GetVersionedState(sourcePath, out var unknownReason);
+            if (sourceState == FRGVersionControl.Core.Svn.SvnCommandRunner.VersionedState.Unknown)
+            {
+                ShowRefusal("move", sourcePath, unknownReason);
+                return AssetMoveResult.FailedMove;
+            }
+            if (sourceState == FRGVersionControl.Core.Svn.SvnCommandRunner.VersionedState.Unversioned)
             {
                 return AssetMoveResult.DidNotMove;
             }
@@ -547,7 +553,13 @@ namespace FRGVersionControl.Hooks
             {
                 string srcMeta = sourcePath + ".meta";
                 string dstMeta = destinationPath + ".meta";
-                if (FRGVersionControl.Core.Svn.SvnCommandRunner.IsVersioned(srcMeta))
+                var metaState = FRGVersionControl.Core.Svn.SvnCommandRunner.GetVersionedState(srcMeta, out var metaReason);
+                if (metaState == FRGVersionControl.Core.Svn.SvnCommandRunner.VersionedState.Unknown)
+                {
+                    Debug.LogWarning($"[FRGVersionControl] Moved {sourcePath}, but its .meta could not be checked ({metaReason}) " +
+                                     $"{srcMeta} may show as missing plus unversioned. Use FRG Version Control > Changes to reconcile it.");
+                }
+                if (metaState == FRGVersionControl.Core.Svn.SvnCommandRunner.VersionedState.Versioned)
                 {
                     var metaResult = FRGVersionControl.Core.Svn.SvnCommandRunner.Move(srcMeta, dstMeta);
                     if (!metaResult.success)
@@ -613,6 +625,12 @@ namespace FRGVersionControl.Hooks
             //    path so one call covers the pair. Committed nodes come back untouched.
             var prepPaths = isMeta ? new[] { assetPath } : new[] { assetPath, assetPath + ".meta" };
             var prep = FRGVersionControl.Core.Svn.SvnCommandRunner.PrepareDelete(prepPaths);
+            if (prep != null && prep.busy)
+            {
+                ShowRefusal("delete", assetPath,
+                    $"An SVN operation is running, so '{System.IO.Path.GetFileName(assetPath)}' was not deleted. Wait for it to finish, then delete the asset again.");
+                return AssetDeleteResult.FailedDelete;
+            }
             bool lockedByMe = FileLockManager.Instance.IsLockedByMe(assetPath);
             var disposition = PlanDelete(prep, assetPath, isMeta,
                 FileLockManager.Instance.IsLockableFileType(assetPath), lockedByMe);
@@ -687,6 +705,22 @@ namespace FRGVersionControl.Hooks
                 FRGVersionControl.UI.FileLockProjectWindowOverlay.RefreshGlobalSvnStatusCache();
             }, null);
             return AssetDeleteResult.DidDelete;
+        }
+
+        private const string BusyRefusalShownKey = "FRGVersionControl.BusyRefusalShownAt";
+
+        /// <summary>Refuses a move/delete whose SVN state could not be checked, with an action
+        /// sentence; the dialog is shown at most once every few seconds so a multi-asset operation
+        /// does not stack dialogs (every refusal is logged).</summary>
+        private static void ShowRefusal(string verb, string assetPath, string reason)
+        {
+            var sentence = $"'{System.IO.Path.GetFileName(assetPath)}' was not {(verb == "move" ? "moved" : "deleted")}. {reason}";
+            Debug.LogWarning("[FRGVersionControl] " + sentence);
+            double now = EditorApplication.timeSinceStartup;
+            double last = SessionState.GetFloat(BusyRefusalShownKey, -100f);
+            if (now - last < 5.0) return;
+            SessionState.SetFloat(BusyRefusalShownKey, (float)now);
+            EditorUtility.DisplayDialog("FRG Version Control", sentence, "OK");
         }
 
         /// <summary>What the delete hook does after the core has classified the path.</summary>
@@ -858,7 +892,17 @@ namespace FRGVersionControl.Hooks
             new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         private static bool s_AutoAddPending = false;
         private const double AUTO_ADD_DEBOUNCE_SECONDS = 0.8;
-        private static double s_StartupEpoch = -1;
+        private const double AUTO_ADD_RETRY_SECONDS = 5.0;
+        private const int AUTO_ADD_MAX_ATTEMPTS = 4;
+        private static int s_AutoAddFailedAttempts;
+
+        /// <summary>More new files than this in one batch are not added silently (a startup
+        /// import of an unversioned folder, for example); a notice points to the Changes tab.</summary>
+        public const int AutoAddSilentLimit = 200;
+
+        /// <summary>Set when a batch exceeded <see cref="AutoAddSilentLimit"/>; the Changes window
+        /// shows it until dismissed.</summary>
+        public static string AutoAddNotice;
 
         /// <summary>
         /// Called after assets are imported/created
@@ -871,22 +915,6 @@ namespace FRGVersionControl.Hooks
         {
             if (!FileLockManager.Instance.IsInitialized)
                 return;
-
-            // Phase 2 Stage 3: Mode F (silent `git restore --source` clobber) reconciliation
-            // requires `post_edit_content_sha256` to be kept current after every save.
-            // For each imported (== saved or re-imported) path that's in the override
-            // registry, recompute the content hash. Non-override files pay zero cost
-            // because IsInOverrideMode filters them out.
-            if (FileLockOverrideManager.Instance.IsInitialized && importedAssets != null)
-            {
-                foreach (var path in importedAssets)
-                {
-                    if (FileLockOverrideManager.Instance.IsInOverrideMode(path))
-                    {
-                        FileLockOverrideManager.Instance.UpdatePostEditHash(path);
-                    }
-                }
-            }
 
             // Handle moved/renamed assets
             // Lock both old path (deleted) and new path (added) to protect the full rename operation
@@ -966,14 +994,7 @@ namespace FRGVersionControl.Hooks
             // `svn status` + `svn add --parents` to avoid the per-file process-spawn freeze
             // that synchronous IsVersioned checks would cause.
             //
-            // Guards:
-            //   - Skip during the first 5 seconds after domain reload (initial-import storm).
-            //   - Skip while EditorApplication.isUpdating.
-            //   - Skip during temporary-disable (batch tools).
             if (FRGVersionControl.Services.FileLockSilenceService.IsTemporarilyDisabled) return;
-            if (s_StartupEpoch < 0) s_StartupEpoch = EditorApplication.timeSinceStartup;
-            bool isStartupPhase = (EditorApplication.timeSinceStartup - s_StartupEpoch) < 5.0;
-            if (isStartupPhase || EditorApplication.isUpdating) return;
 
             // Build the import set for .meta sibling logic.
             var importedSet = new HashSet<string>(importedAssets, StringComparer.OrdinalIgnoreCase);
@@ -1007,6 +1028,7 @@ namespace FRGVersionControl.Hooks
             void WaitThenProcess()
             {
                 if (EditorApplication.timeSinceStartup < targetTime) return;
+                if (EditorApplication.isUpdating || EditorApplication.isCompiling) return;
                 EditorApplication.update -= WaitThenProcess;
                 ProcessAutoAddQueue();
             }
@@ -1018,11 +1040,37 @@ namespace FRGVersionControl.Hooks
             if (s_AutoAddQueue.Count == 0) return;
 
             var paths = s_AutoAddQueue.ToArray();
-            s_AutoAddQueue.Clear();
 
             // Refresh snapshot synchronously (single svn status call covers everything) so we
             // have accurate per-path status without N process spawns.
-            FRGVersionControl.Core.SvnStatusCache.RefreshSync();
+            if (!FRGVersionControl.Core.SvnStatusCache.RefreshSync())
+            {
+                s_AutoAddFailedAttempts++;
+                if (s_AutoAddFailedAttempts >= AUTO_ADD_MAX_ATTEMPTS)
+                {
+                    AutoAddNotice = $"SVN status could not be read, so {s_AutoAddQueue.Count} new file(s) were not added to SVN automatically. " +
+                                    "Add them from the Changes tab once SVN is responding.";
+                    Debug.LogWarning("[FRGVersionControl] " + AutoAddNotice);
+                    s_AutoAddQueue.Clear();
+                    s_AutoAddFailedAttempts = 0;
+                    return;
+                }
+                if (!s_AutoAddPending)
+                {
+                    s_AutoAddPending = true;
+                    double retryAt = EditorApplication.timeSinceStartup + AUTO_ADD_RETRY_SECONDS * (1 << (s_AutoAddFailedAttempts - 1));
+                    void RetryLater()
+                    {
+                        if (EditorApplication.timeSinceStartup < retryAt) return;
+                        EditorApplication.update -= RetryLater;
+                        ScheduleAutoAddProcessor();
+                    }
+                    EditorApplication.update += RetryLater;
+                }
+                return;
+            }
+            s_AutoAddFailedAttempts = 0;
+            s_AutoAddQueue.Clear();
 
             // Build basename → Missing-path lookup for the rename-pair guard (B-2 protection).
             var missingByBasename = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
@@ -1049,6 +1097,13 @@ namespace FRGVersionControl.Hooks
                 toAdd.Add(p);
             }
             if (toAdd.Count == 0) return;
+            if (toAdd.Count > AutoAddSilentLimit)
+            {
+                AutoAddNotice = $"{toAdd.Count} new files were found at once, so they were not added to SVN automatically. " +
+                                "Review them in the Changes tab and add the ones you want.";
+                Debug.LogWarning("[FRGVersionControl] " + AutoAddNotice);
+                return;
+            }
 
             var lockableExts = FileLockManager.Instance.GetLockableExtensionsSet();
             var addResult = FRGVersionControl.Core.Svn.SvnCommandRunner.AddForCommit(toAdd.ToArray(), lockableExts);

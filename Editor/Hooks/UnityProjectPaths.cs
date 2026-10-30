@@ -1,23 +1,16 @@
-using System.IO;
+using FRGVersionControl.Core;
 using FRGVersionControl.Core.Abstractions;
-using UnityEngine;
 
 namespace FRGVersionControl.Hooks
 {
+    /// <summary>Project paths for the IPC context. <see cref="WorkingCopyRoot"/> is the Unity project
+    /// folder sent as ctx.wc — the working-copy root or a versioned folder inside one; the core
+    /// finds the real root itself (SVN_CORE_API.md §6.7).</summary>
     public sealed class UnityProjectPaths : IProjectPaths
     {
-        public string WorkingCopyRoot
-        {
-            get
-            {
-                var dp = Application.dataPath.Replace('\\', '/');
-                if (dp.EndsWith("/Assets")) return dp.Substring(0, dp.Length - "/Assets".Length);
-                return dp;
-            }
-        }
-
-        public string AssetsRoot => Application.dataPath.Replace('\\', '/');
-        public string LibraryRoot => Path.Combine(WorkingCopyRoot, "Library").Replace('\\', '/');
-        public string ToolingConfigDir => Path.Combine(WorkingCopyRoot, ".svn-tooling-config").Replace('\\', '/');
+        public string WorkingCopyRoot => ProjectFolder.Path;
+        public string AssetsRoot => ProjectFolder.Path + "/Assets";
+        public string LibraryRoot => ProjectFolder.Path + "/Library";
+        public string ToolingConfigDir => ProjectFolder.Path + "/.svn-tooling-config";
     }
 }

@@ -31,7 +31,7 @@ namespace FRGVersionControl.Core
     public static class SvnStatusCache
     {
         private static readonly object s_Sync = new object();
-        private static Dictionary<string, SvnStatusEntry> s_Snapshot = new Dictionary<string, SvnStatusEntry>();
+        private static Dictionary<string, SvnStatusEntry> s_Snapshot = new Dictionary<string, SvnStatusEntry>(PathKey.Comparer);
         private static DateTime s_LastRefreshUtc = DateTime.MinValue;
         private static bool s_RefreshInFlight = false;
 
@@ -110,14 +110,14 @@ namespace FRGVersionControl.Core
                     // after every commit/lock/unlock + on toolbar Refresh).
                     var raw = await GetAllStatusEntriesViaIpcOrFallback(ct).ConfigureAwait(false);
                     if (raw == null) return;
-                    var normalized = new Dictionary<string, SvnStatusEntry>(raw.Count);
+                    var normalized = new Dictionary<string, SvnStatusEntry>(raw.Count, PathKey.Comparer);
                     foreach (var kv in raw)
                     {
                         // Phase 4 polish: drop SVN's conflict sidecars from the cache. They show
                         // up as Untracked in raw `svn status` (`?` rows) but they're SVN-managed
                         // artifacts, removed automatically on resolve. Surfacing them in the panel
                         // confuses artists.
-                        if (IsSvnConflictSidecar(kv.Key)) continue;
+                        if (kv.Value.status == SvnFileStatus.Untracked && IsSvnConflictSidecar(kv.Key)) continue;
                         var normalizedPath = Normalize(kv.Key);
                         var entry = kv.Value;
                         entry.path = normalizedPath;
@@ -157,11 +157,13 @@ namespace FRGVersionControl.Core
         /// `EditorApplication.update`, so blocking briefly is acceptable (the alternative is N
         /// `svn info` process spawns which would freeze the editor for minutes on mass-import).
         /// Skips if a refresh is already in flight (no-op; the in-flight one will finish first).</summary>
-        public static void RefreshSync()
+        /// <returns>True when the snapshot was refreshed; false when it was skipped (a refresh
+        /// already in flight, svn-core busy, or the read failed) and the prior snapshot stands.</returns>
+        public static bool RefreshSync()
         {
             lock (s_Sync)
             {
-                if (s_RefreshInFlight) return;
+                if (s_RefreshInFlight) return false;
                 s_RefreshInFlight = true;
             }
             try
@@ -170,12 +172,12 @@ namespace FRGVersionControl.Core
                 if (raw == null)
                 {
                     Debug.LogWarning("[SvnStatusCache] RefreshSync skipped: status unavailable (busy or failed). Prior snapshot retained.");
-                    return;
+                    return false;
                 }
-                var normalized = new Dictionary<string, SvnStatusEntry>(raw.Count);
+                var normalized = new Dictionary<string, SvnStatusEntry>(raw.Count, PathKey.Comparer);
                 foreach (var kv in raw)
                 {
-                    if (IsSvnConflictSidecar(kv.Key)) continue;
+                    if (kv.Value.status == SvnFileStatus.Untracked && IsSvnConflictSidecar(kv.Key)) continue;
                     var normalizedPath = Normalize(kv.Key);
                     var entry = kv.Value;
                     entry.path = normalizedPath;
@@ -188,10 +190,12 @@ namespace FRGVersionControl.Core
                 }
                 try { SnapshotUpdated?.Invoke(); }
                 catch (Exception ex) { Debug.LogWarning($"[SvnStatusCache] subscriber threw: {ex.Message}"); }
+                return true;
             }
             catch (Exception ex)
             {
                 Debug.LogWarning($"[SvnStatusCache] RefreshSync failed: {ex.Message}. Prior snapshot retained.");
+                return false;
             }
             finally
             {
@@ -218,12 +222,12 @@ namespace FRGVersionControl.Core
         {
             lock (s_Sync)
             {
-                s_Snapshot = new Dictionary<string, SvnStatusEntry>();
+                s_Snapshot = new Dictionary<string, SvnStatusEntry>(PathKey.Comparer);
                 s_LastRefreshUtc = DateTime.MinValue;
             }
         }
 
-        private static string Normalize(string path) => (path ?? "").Replace('\\', '/');
+        private static string Normalize(string path) => PathKey.Normalize(path);
 
         // Phase 4 polish: SVN conflict-sidecar regex.
         // Matches:
@@ -240,10 +244,25 @@ namespace FRGVersionControl.Core
             @"\.(?:r\d+|mine|prej)(?:\.meta)?$",
             RegexOptions.Compiled | RegexOptions.IgnoreCase);
 
+        /// <summary>True for a file named like an SVN conflict sidecar whose conflicted file exists
+        /// beside it (<c>x.cs.mine</c> next to <c>x.cs</c>). A real asset that only happens to end in
+        /// .r1 / .mine / .prej, with no such neighbour, is not a sidecar.</summary>
         public static bool IsSvnConflictSidecar(string path)
         {
             if (string.IsNullOrEmpty(path)) return false;
-            return s_ConflictSidecarRegex.IsMatch(path);
+            var m = s_ConflictSidecarRegex.Match(path);
+            if (!m.Success) return false;
+            var basePath = path.Substring(0, m.Index);
+            if (basePath.Length == 0) return false;
+            try
+            {
+                var full = System.IO.Path.IsPathRooted(basePath) ? basePath : System.IO.Path.Combine(ProjectFolder.Path, basePath);
+                return System.IO.File.Exists(full);
+            }
+            catch
+            {
+                return false;
+            }
         }
     }
 }

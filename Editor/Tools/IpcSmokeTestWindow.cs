@@ -211,13 +211,13 @@ namespace FRGVersionControl.Tools
                 Args = "{\"targetId\":\"non-existent\"}", Expectation = Expect.OkOrInfo,
                 LabelOnPass = "cancel of unknown id handled" };
 
-            // -- Upstream-dependent ops (may surface info verdict if server is offline) --
-            yield return new Probe { Op = "meta.info (upstream)", InvokeAs = "meta.info",
-                Args = "{}", Expectation = Expect.OkOrInfo,
-                LabelOnPass = "upstream reachable" };
-            yield return new Probe { Op = "auth.bootstrap (upstream)", InvokeAs = "auth.bootstrap",
-                Args = "{}", Expectation = Expect.OkOrInfo,
-                LabelOnPass = "auth cache reachable" };
+            yield return new Probe { Op = "meta.layout", Args = "{}", Expectation = Expect.Ok,
+                LabelOnPass = "project folder located in its working copy (local)" };
+
+            // -- Server-dependent op (info verdict when the server is offline) --
+            yield return new Probe { Op = "auth.bootstrap (server)", InvokeAs = "auth.bootstrap",
+                Args = "{}", Expectation = Expect.Reachable,
+                LabelOnPass = "server answered with the cached credentials" };
         }
 
         private static async Task<SmokeRow> RunOne(IpcSvnClient client, Probe probe, CancellationToken ct)
@@ -265,6 +265,21 @@ namespace FRGVersionControl.Tools
                             ElapsedMs = result.ElapsedMs,
                             Detail = "guard did NOT fire — saw " + (result.Ok ? "ok=true" : (result.ErrorKind ?? "unknown error")) };
 
+                case Expect.Reachable:
+                    if (result.Ok && IpcJson.ReadScalar(result.RawLine, "reachable", inResult: true) == "true")
+                    {
+                        return new SmokeRow { Op = probe.Op, Verdict = Verdict.Pass, Glyph = "✓",
+                            ElapsedMs = result.ElapsedMs, Detail = probe.LabelOnPass };
+                    }
+                    if (result.Ok)
+                    {
+                        return new SmokeRow { Op = probe.Op, Verdict = Verdict.Info, Glyph = "•",
+                            ElapsedMs = result.ElapsedMs,
+                            Detail = "server not reachable: " + Truncate(IpcJson.ReadScalar(result.RawLine, "message", inResult: true), 80),
+                            Action = IpcJson.ReadScalar(result.RawLine, "defaultAction", inResult: true) };
+                    }
+                    goto default;
+
                 case Expect.OkOrInfo:
                 default:
                     return result.Ok
@@ -284,7 +299,7 @@ namespace FRGVersionControl.Tools
             return s.Length <= n ? s : s.Substring(0, n) + "…";
         }
 
-        private enum Expect { Ok, ProtocolReject, OkOrInfo }
+        private enum Expect { Ok, ProtocolReject, OkOrInfo, Reachable }
         private enum Verdict { Pass, Fail, Info }
 
         private sealed class Probe

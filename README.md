@@ -27,8 +27,8 @@ https://github.com/Haagndaazer/FRGVersionControl-Unity.git#0.2.88
 ## Requirements
 
 - **Unity 6 (6000.0)** or newer.
-- **TortoiseSVN with command-line client tools** installed at the default location (`C:\Program Files\TortoiseSVN\`). During the installer, check the "command line client tools" box (off by default).
-- The Unity project must be inside an SVN working copy.
+- **TortoiseSVN 1.14 with command-line client tools** (any install folder; svn-core finds it through the TortoiseSVN registry entry). During the installer, check the "command line client tools" box (off by default).
+- The Unity project folder must be a versioned folder in an SVN checkout — either the checkout itself (for example `trunk` checked out on its own) or a folder inside it (for example the whole repository checked out, with the project in `trunk/`). Open the project folder itself in Unity Hub.
 
 ## Quickstart
 

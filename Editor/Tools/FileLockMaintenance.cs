@@ -30,12 +30,17 @@ namespace FRGVersionControl.Tools
         public static async void RunMaintenanceNow()
         {
             string projectRoot = SvnCommandRunner.ProjectRoot;
-            long beforeBytes = MeasurePristineBytes(projectRoot);
+            string wcRoot = WorkingCopyLayout.WcRoot;
+            long beforeBytes = await Task.Run(() => MeasurePristineBytes(wcRoot)).ConfigureAwait(true);
+            bool nested = !string.Equals(wcRoot, projectRoot.Replace('\\', '/'), System.StringComparison.OrdinalIgnoreCase);
 
             bool confirmed = EditorUtility.DisplayDialog(
                 "Run SVN Maintenance?",
                 "This will run `svn cleanup --vacuum-pristines` on the current working copy.\n\n" +
+                (nested ? $"The pristine store belongs to the whole checkout at {wcRoot}.\n\n" : "") +
                 $"Current `.svn/pristine/` size: {FormatBytes(beforeBytes)}\n\n" +
+                "Do not run this while TortoiseSVN or another editor is running an SVN operation on this checkout: " +
+                "cleanup takes over working-copy locks.\n\n" +
                 "Vacuum-pristines drops unreferenced base-revision copies. Phase 1 measured " +
                 "~3x working-copy size before vacuum, ~1x after. Safe to run anytime; " +
                 "active ignore-on-commit entries and uncommitted modifications are protected because their " +
@@ -50,7 +55,7 @@ namespace FRGVersionControl.Tools
             try
             {
                 bool success = await RunVacuumPristines(projectRoot).ConfigureAwait(true);
-                long afterBytes = MeasurePristineBytes(projectRoot);
+                long afterBytes = await Task.Run(() => MeasurePristineBytes(wcRoot)).ConfigureAwait(true);
                 long freedBytes = beforeBytes - afterBytes;
 
                 Debug.Log($"[FRGVersionControl.Maintenance] vacuum-pristines complete. " +
@@ -108,13 +113,14 @@ namespace FRGVersionControl.Tools
         }
 
         /// <summary>
-        /// Filesystem-level read of `.svn/pristine/` byte count. Don't use `svn cleanup
-        /// --dry-run` for this — `--dry-run` for cleanup behavior isn't reliable and we
-        /// want a number that reflects actual disk usage anyway.
+        /// Filesystem-level read of `.svn/pristine/` byte count under the working-copy root
+        /// (<see cref="WorkingCopyLayout.WcRoot"/>). Walks the whole pristine store, so call it off the
+        /// main thread. Don't use `svn cleanup --dry-run` for this — `--dry-run` for cleanup
+        /// behavior isn't reliable and we want a number that reflects actual disk usage anyway.
         /// </summary>
-        public static long MeasurePristineBytes(string projectRoot)
+        public static long MeasurePristineBytes(string wcRoot)
         {
-            string pristineDir = Path.Combine(projectRoot, ".svn", "pristine");
+            string pristineDir = Path.Combine(wcRoot, ".svn", "pristine");
             if (!Directory.Exists(pristineDir)) return 0;
 
             try
@@ -129,9 +135,9 @@ namespace FRGVersionControl.Tools
             }
         }
 
-        public static int CountPristineObjects(string projectRoot)
+        public static int CountPristineObjects(string wcRoot)
         {
-            string pristineDir = Path.Combine(projectRoot, ".svn", "pristine");
+            string pristineDir = Path.Combine(wcRoot, ".svn", "pristine");
             if (!Directory.Exists(pristineDir)) return 0;
             try
             {
@@ -149,10 +155,11 @@ namespace FRGVersionControl.Tools
             const long KB = 1024;
             const long MB = KB * 1024;
             const long GB = MB * 1024;
-            if (bytes >= GB) return $"{bytes / (double)GB:F2} GB";
-            if (bytes >= MB) return $"{bytes / (double)MB:F2} MB";
-            if (bytes >= KB) return $"{bytes / (double)KB:F1} KB";
-            return $"{bytes} B";
+            var inv = System.Globalization.CultureInfo.InvariantCulture;
+            if (bytes >= GB) return (bytes / (double)GB).ToString("F2", inv) + " GB";
+            if (bytes >= MB) return (bytes / (double)MB).ToString("F2", inv) + " MB";
+            if (bytes >= KB) return (bytes / (double)KB).ToString("F1", inv) + " KB";
+            return bytes.ToString(inv) + " B";
         }
     }
 }

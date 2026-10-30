@@ -99,9 +99,17 @@ namespace FRGVersionControl.Services
             CheckForWcDbUpdate();
         }
 
+        private static string s_WcDbPath;
+
         private static void CheckForWcDbUpdate()
         {
+            WorkingCopyLayout.EnsureFetched();
             string p = GetWcDbPath();
+            if (!string.Equals(p, s_WcDbPath, StringComparison.OrdinalIgnoreCase))
+            {
+                s_WcDbPath = p;
+                s_LastWcDbTime = 0;
+            }
             if (!File.Exists(p)) return; // not in an SVN WC (unusual)
 
             try
@@ -135,7 +143,7 @@ namespace FRGVersionControl.Services
 
         private static string GetWcDbPath()
         {
-            return Path.Combine(SvnCommandRunner.ProjectRoot, ".svn", "wc.db");
+            return Path.Combine(WorkingCopyLayout.WcRoot, ".svn", "wc.db");
         }
 
         public static void Enable()

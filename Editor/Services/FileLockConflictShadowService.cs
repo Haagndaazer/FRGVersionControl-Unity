@@ -144,6 +144,7 @@ namespace FRGVersionControl.Services
             foreach (var p in currentlyConflicted)
             {
                 if (s_StubbedPaths.Contains(p)) continue;
+                if (!HasConflictMarkers(FullPathOf(p))) continue;
                 if (TryStub(p))
                 {
                     s_StubbedPaths.Add(p);
@@ -163,11 +164,10 @@ namespace FRGVersionControl.Services
             }
         }
 
-        // Tightened to SVN's actual marker forms (`<<<<<<< .mine`, `<<<<<<< working`,
-        // `<<<<<<< .merge-left.r<N>`). Requires marker + whitespace + non-whitespace token.
-        private static readonly Regex s_MarkerRegex = new Regex(
-            @"^<<<<<<<\s+\S",
-            RegexOptions.Compiled);
+        // SVN's marker forms (`<<<<<<< .mine`, `<<<<<<< working`, `<<<<<<< .merge-left.r<N>`,
+        // closed by `>>>>>>> .r<N>`): marker + whitespace + label, at the start of ANY line.
+        private static readonly Regex s_StartMarkerRegex = new Regex(@"^<<<<<<<\s+\S", RegexOptions.Compiled | RegexOptions.Multiline);
+        private static readonly Regex s_EndMarkerRegex = new Regex(@"^>>>>>>>\s+\S", RegexOptions.Compiled | RegexOptions.Multiline);
 
         // Debounce guard for ScanAndStubNow. Prevents focus-toggle thrash and double-work
         // when triggers 1 (DoUpdateAsync) and 4 (OnSnapshotUpdated) fire on the same update.
@@ -175,19 +175,14 @@ namespace FRGVersionControl.Services
         private const long DEBOUNCE_TICKS = TimeSpan.TicksPerMillisecond * 500;
 
         /// <summary>
-        /// Eagerly scan the working copy for `.cs`/`.asmdef`/`.asmref` files containing SVN
-        /// merge markers and stub them BEFORE Unity's AssetDatabase notices, eliminating the
-        /// transient compile-error flash that occurs when SnapshotUpdated-driven stubbing
-        /// races with auto-import. Synchronous, idempotent (existing TryStub header check
-        /// prevents double-stubbing). Read-cap of 64 bytes per file means I/O is dominated
-        /// by directory enumeration. Triggers: panel DoUpdateAsync post-success, domain-load
-        /// (one-shot via delayCall), focus-gained, OnSnapshotUpdated piggyback.
-        ///
-        /// Walking Assets/ for `.cs` files is acceptable for current scale; on the eventual
-        /// 11TB IT-track repo this should narrow to `svn status` Conflict-only paths or move
-        /// to a FileSystemWatcher-driven approach. Concurrency: TryStub does File.WriteAllText
-        /// while a `svn resolve` could conceivably be in flight, but resolve completes in
-        /// milliseconds and the user can't trigger one during the same focus event.
+        /// Eagerly find conflicted `.cs`/`.asmdef`/`.asmref` files and stub them BEFORE Unity's
+        /// AssetDatabase notices, eliminating the transient compile-error flash that occurs when
+        /// SnapshotUpdated-driven stubbing races with auto-import. Walks SVN's own conflict
+        /// sidecars (`*.mine`, `*.working`) under Assets/ and Packages/ — only conflicted files have
+        /// them — and stubs a file only when it also contains conflict markers on some line.
+        /// Synchronous, idempotent (TryStub's header check prevents double-stubbing). Triggers:
+        /// panel DoUpdateAsync post-success, domain-load (one-shot via delayCall), focus-gained,
+        /// compilationStarted, OnSnapshotUpdated piggyback.
         /// </summary>
         public static void ScanAndStubNow(bool force = false)
         {
@@ -195,38 +190,40 @@ namespace FRGVersionControl.Services
             if (!force && (now - s_LastScanTicks) < DEBOUNCE_TICKS) return;
             s_LastScanTicks = now;
 
-            string assetsRoot = Path.Combine(SvnCommandRunner.ProjectRoot, "Assets");
-            if (!Directory.Exists(assetsRoot)) return;
-
-            byte[] readBuf = new byte[64];
             bool stubbedAny = false;
-
-            foreach (var ext in s_StubbableExts)
+            foreach (var folder in new[] { "Assets", "Packages" })
             {
-                string[] files;
-                try
+                string root = Path.Combine(SvnCommandRunner.ProjectRoot, folder);
+                if (!Directory.Exists(root)) continue;
+                foreach (var pattern in s_SidecarPatterns)
                 {
-                    files = Directory.GetFiles(assetsRoot, "*" + ext, SearchOption.AllDirectories);
-                }
-                catch (Exception ex)
-                {
-                    Debug.LogWarning($"[FRGVersionControl] ScanAndStubNow enumerate failed for *{ext}: {ex.Message}");
-                    continue;
-                }
-
-                foreach (var fullPath in files)
-                {
-                    if (!FileHasConflictMarkerAtHead(fullPath, readBuf)) continue;
-
-                    string assetPath;
-                    try { assetPath = MakeAssetPath(fullPath); }
-                    catch { continue; }
-
-                    if (s_StubbedPaths.Contains(assetPath)) continue;
-                    if (TryStub(assetPath))
+                    string[] sidecars;
+                    try
                     {
-                        s_StubbedPaths.Add(assetPath);
-                        stubbedAny = true;
+                        sidecars = Directory.GetFiles(root, pattern, SearchOption.AllDirectories);
+                    }
+                    catch (Exception ex)
+                    {
+                        Debug.LogWarning($"[FRGVersionControl] ScanAndStubNow enumerate failed for {pattern} under {folder}: {ex.Message}");
+                        continue;
+                    }
+
+                    foreach (var sidecar in sidecars)
+                    {
+                        string fullPath = sidecar.Substring(0, sidecar.Length - (pattern.Length - 1));
+                        if (!s_StubbableExts.Contains(Path.GetExtension(fullPath))) continue;
+                        if (!File.Exists(fullPath) || !HasConflictMarkers(fullPath)) continue;
+
+                        string assetPath;
+                        try { assetPath = MakeAssetPath(fullPath); }
+                        catch { continue; }
+
+                        if (s_StubbedPaths.Contains(assetPath)) continue;
+                        if (TryStub(assetPath))
+                        {
+                            s_StubbedPaths.Add(assetPath);
+                            stubbedAny = true;
+                        }
                     }
                 }
             }
@@ -253,8 +250,7 @@ namespace FRGVersionControl.Services
                 : Path.Combine(SvnCommandRunner.ProjectRoot, assetPath);
             if (!File.Exists(fullPath)) return false;
 
-            byte[] buf = new byte[64];
-            if (!FileHasConflictMarkerAtHead(fullPath, buf)) return false;
+            if (!HasConflictEvidence(fullPath, assetPath) || !HasConflictMarkers(fullPath)) return false;
 
             if (TryStub(assetPath))
             {
@@ -264,23 +260,62 @@ namespace FRGVersionControl.Services
             return false;
         }
 
-        private static bool FileHasConflictMarkerAtHead(string fullPath, byte[] buf)
+        // SVN leaves these next to a text-conflicted file (update: .mine / .r<N>; merge: .working).
+        private static readonly string[] s_SidecarPatterns = { "*.mine", "*.working" };
+
+        private static string FullPathOf(string assetPath)
+            => Path.IsPathRooted(assetPath) ? assetPath : Path.Combine(SvnCommandRunner.ProjectRoot, assetPath);
+
+        /// <summary>SVN's own conflict evidence for a file: a .mine / .working / .r&lt;N&gt; sidecar
+        /// beside it, or status Conflict in the loaded status cache. A healthy file that merely
+        /// contains a marker-like line is never stubbed.</summary>
+        internal static bool HasConflictEvidence(string fullPath, string assetPath)
         {
             try
             {
-                using (var fs = new FileStream(fullPath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite))
+                if (File.Exists(fullPath + ".mine") || File.Exists(fullPath + ".working")) return true;
+                string dir = Path.GetDirectoryName(fullPath);
+                string name = Path.GetFileName(fullPath);
+                if (!string.IsNullOrEmpty(dir) && Directory.Exists(dir))
                 {
-                    int n = fs.Read(buf, 0, buf.Length);
-                    if (n < 8) return false;
-                    string head = System.Text.Encoding.UTF8.GetString(buf, 0, n);
-                    return s_MarkerRegex.IsMatch(head);
+                    foreach (var f in Directory.GetFiles(dir, name + ".r*"))
+                    {
+                        string suffix = f.Substring(fullPath.Length + 2);
+                        if (suffix.Length > 0 && IsAllDigits(suffix)) return true;
+                    }
                 }
+            }
+            catch { }
+            return SvnStatusCache.Get(assetPath) == SvnFileStatus.Conflict;
+        }
+
+        private static bool IsAllDigits(string s)
+        {
+            foreach (var c in s) if (c < '0' || c > '9') return false;
+            return true;
+        }
+
+        /// <summary>A conflict start marker and an end marker, each at the start of some line.</summary>
+        internal static bool HasConflictMarkers(string fullPath)
+        {
+            try
+            {
+                string text;
+                using (var fs = new FileStream(fullPath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite))
+                using (var sr = new StreamReader(fs))
+                {
+                    text = sr.ReadToEnd();
+                }
+                return HasConflictMarkerText(text);
             }
             catch
             {
                 return false;
             }
         }
+
+        internal static bool HasConflictMarkerText(string text)
+            => !string.IsNullOrEmpty(text) && s_StartMarkerRegex.IsMatch(text) && s_EndMarkerRegex.IsMatch(text);
 
         private static string MakeAssetPath(string fullPath)
         {

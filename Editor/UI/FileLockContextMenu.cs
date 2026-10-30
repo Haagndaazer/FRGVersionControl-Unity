@@ -433,7 +433,7 @@ namespace FRGVersionControl.UI
         // -------------------------------------------------------------------------
 
         [MenuItem("Assets/FRG Version Control/Refresh Locks and SVN Status", false, 2005)]
-        private static void RefreshLocksAndGitStatus()
+        private static void RefreshLocksAndSvnStatus()
         {
             // Refresh locks cache
             bool lockRefreshSuccess = FileLockManager.Instance.RefreshLockCache();
@@ -555,8 +555,8 @@ namespace FRGVersionControl.UI
             return Selection.objects.Length == 1 && FileLockManager.Instance.IsInitialized;
         }
 
-        [MenuItem("Assets/FRG Version Control/Refresh Locks and Git Status", true)]
-        private static bool ValidateRefreshLocksAndGitStatus()
+        [MenuItem("Assets/FRG Version Control/Refresh Locks and SVN Status", true)]
+        private static bool ValidateRefreshLocksAndSvnStatus()
         {
             return FileLockManager.Instance.IsInitialized;
         }

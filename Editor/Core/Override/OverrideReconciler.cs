@@ -94,7 +94,9 @@ namespace FRGVersionControl.Core.OverrideMode
                 string err;
                 if (!FileLockOverrideManager.Instance.ClearIgnoreOnCommit(entry.path, out err))
                 {
-                    Debug.LogError($"[FRGVersionControl.IgnoreOnCommit] Mode A ClearIgnoreOnCommit failed: {err}");
+                    Debug.LogError($"[FRGVersionControl.IgnoreOnCommit] Mode A ClearIgnoreOnCommit failed: {err} " +
+                                   "Your edits and the override are kept, and you will not be asked again this session; " +
+                                   "end the override from the Changes tab when ready.");
                 }
                 else
                 {

@@ -3,7 +3,9 @@ using System;
 namespace FRGVersionControl.Core.OverrideMode
 {
     /// <summary>
-    /// One entry in the ignore-on-commit registry sidecar (.svn/ignore-on-commit-registry.json).
+    /// One entry of the ignore-on-commit registry, as svn-core reports it (override.list and the
+    /// snapshot of override.begin/end/forget; SVN_CORE_API.md §5.8). The sidecar itself is owned
+    /// by svn-core.
     ///
     /// Phase 2 Step E SVN port — schema break vs prior LFS shape:
     ///   pre_override_pointer_blob_oid (Git SHA-1) → pre_ignore_on_commit_revision (int) — the
@@ -40,16 +42,5 @@ namespace FRGVersionControl.Core.OverrideMode
             this.lock_id_at_start = lockId ?? "";
             this.lock_holder_at_start = lockHolder ?? "";
         }
-    }
-
-    /// <summary>
-    /// JsonUtility cannot deserialize a root-level array. The sidecar is wrapped
-    /// in this envelope on read/write.
-    /// </summary>
-    [Serializable]
-    internal class OverrideRegistryEnvelope
-    {
-        public System.Collections.Generic.List<OverrideEntry> entries =
-            new System.Collections.Generic.List<OverrideEntry>();
     }
 }

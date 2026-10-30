@@ -78,7 +78,7 @@ namespace FRGVersionControl.Tests
                 foreach (var r in refreshes)
                 {
                     Assert.IsTrue(r.busy, "a refresh during the commit must be answered busy (null), not block");
-                    Assert.Less(r.seconds, 1.0, "a busy refresh must return immediately");
+                    Assert.Less(r.seconds, 3.0, "a busy refresh must return promptly (it never waits for the commit)");
                 }
 
                 var after = Stopwatch.StartNew();

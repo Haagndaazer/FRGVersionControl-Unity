@@ -67,6 +67,7 @@ namespace FRGVersionControl.Services
 
             // Phase 2 Step E: OverrideReconciler ported to SVN (Mode A via outOfDate flag,
             // Mode B via StatusUpstreamAll lock map; F/G/H dropped as plan §5.4 specifies).
+            FRGVersionControl.Core.OverrideMode.FileLockOverrideManager.Instance.RefreshFromCore();
             FRGVersionControl.Core.OverrideMode.OverrideReconciler.CheckModeB_LockReleasedUpstream();
             FRGVersionControl.Core.OverrideMode.OverrideReconciler.RunOnce();
         }

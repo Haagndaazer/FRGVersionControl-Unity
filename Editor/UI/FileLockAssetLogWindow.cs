@@ -28,7 +28,7 @@ namespace FRGVersionControl.UI
     {
         private const int PAGE_SIZE = 50;
 
-        [MenuItem("Assets/FRG Version Control/Show Log", false, 2010)]
+        [MenuItem("Assets/FRG Version Control/Show Log", false, 2006)]
         private static void ShowLogForSelection()
         {
             var path = AssetDatabase.GetAssetPath(Selection.activeObject);
@@ -275,22 +275,14 @@ namespace FRGVersionControl.UI
         /// TortoiseSVN). Falls back to Beyond Compare, kdiff3, then a clear error message.</summary>
         private static void ShellOutDiff(string leftPath, string rightPath, string leftLabel, string rightLabel)
         {
-            string[] candidates = new[]
+            foreach (var exe in FRGVersionControl.Core.DiffToolLocator.Candidates())
             {
-                @"C:\Program Files\TortoiseSVN\bin\TortoiseMerge.exe",
-                @"C:\Program Files\Beyond Compare 4\BCompare.exe",
-                @"C:\Program Files\KDiff3\kdiff3.exe",
-                @"C:\Program Files (x86)\TortoiseSVN\bin\TortoiseMerge.exe"
-            };
-            foreach (var exe in candidates)
-            {
-                if (!File.Exists(exe)) continue;
                 try
                 {
                     var psi = new ProcessStartInfo
                     {
                         FileName = exe,
-                        Arguments = exe.EndsWith("TortoiseMerge.exe")
+                        Arguments = FRGVersionControl.Core.DiffToolLocator.IsTortoiseMerge(exe)
                             ? $"/base:\"{leftPath}\" /mine:\"{rightPath}\" /basename:\"{leftLabel}\" /minename:\"{rightLabel}\""
                             : $"\"{leftPath}\" \"{rightPath}\"",
                         UseShellExecute = true
@@ -315,7 +307,7 @@ namespace FRGVersionControl.UI
 
         private static string FormatDate(string iso)
         {
-            if (DateTime.TryParse(iso, out var dt))
+            if (DateTime.TryParse(iso, System.Globalization.CultureInfo.InvariantCulture, System.Globalization.DateTimeStyles.RoundtripKind, out var dt))
                 return dt.ToLocalTime().ToString("yyyy-MM-dd HH:mm");
             return iso;
         }

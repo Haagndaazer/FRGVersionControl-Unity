@@ -48,7 +48,7 @@ namespace FRGVersionControl.Core.IpcClient
 
         private static readonly HashSet<string> s_ReadOnly = new HashSet<string>(StringComparer.Ordinal)
         {
-            "meta.version", "meta.info",
+            "meta.version", "meta.info", "meta.layout",
             "status.query", "status.allEntries", "status.isVersioned",
             "hist.log", "hist.exportRevision", "hist.hashSha256", "hist.list",
             "cl.membership", "cl.userListGet",

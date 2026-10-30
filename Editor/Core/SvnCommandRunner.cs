@@ -35,20 +35,8 @@ namespace FRGVersionControl.Core.Svn
         // Project-root helper (used by Unity-side code that needs the WC path).
         // ====================================================================
 
-        private static string s_ProjectRoot;
-        public static string ProjectRoot
-        {
-            get
-            {
-                if (s_ProjectRoot == null)
-                {
-                    s_ProjectRoot = Application.dataPath
-                        .Replace("/Assets", "")
-                        .Replace("\\Assets", "");
-                }
-                return s_ProjectRoot;
-            }
-        }
+        /// <summary>The Unity project folder (see <see cref="FRGVersionControl.Core.ProjectFolder"/>).</summary>
+        public static string ProjectRoot => FRGVersionControl.Core.ProjectFolder.Path;
 
         /// <summary>Per-WC tooling config dir for SVN auth isolation. Routed through SvnCore
         /// via ctx.configDir; this property is kept as a documentation pointer + back-compat
@@ -57,19 +45,60 @@ namespace FRGVersionControl.Core.Svn
 
         /// <summary>Unity main-thread SynchronizationContext, captured at static init. Used by
         /// async paths to marshal completions back to the editor main thread.</summary>
-        public static readonly SynchronizationContext s_UnityMainSync =
+        public static SynchronizationContext s_UnityMainSync =
             SynchronizationContext.Current ?? new SynchronizationContext();
 
         private static int s_MainThreadId = -1;
 
+        /// <summary>Runs on the main thread at editor load: replaces the fallback context with
+        /// Unity's (in case this class was first touched from a background thread) and records
+        /// the main thread id.</summary>
         [UnityEditor.InitializeOnLoadMethod]
-        private static void CaptureMainThread() => s_MainThreadId = Thread.CurrentThread.ManagedThreadId;
+        private static void CaptureMainThread()
+        {
+            s_MainThreadId = Thread.CurrentThread.ManagedThreadId;
+            var current = SynchronizationContext.Current;
+            if (current != null) s_UnityMainSync = current;
+        }
 
         /// <summary>True on the Unity main thread (captured at editor load). Sync IPC wrappers
         /// called here get a bounded wait budget so a long core operation cannot freeze the editor.</summary>
         public static bool IsMainThread => s_MainThreadId == Thread.CurrentThread.ManagedThreadId;
 
-        private static int? MainThreadBudget(string op) =>
+        /// <summary>
+        /// Runs a mutating op with the main-thread wait budget. On anything but success
+        /// <paramref name="error"/> is a user-facing sentence: busy means the request was never
+        /// sent (retry later); still running or a lost pipe means svn-core may have applied it
+        /// (refresh before retrying); otherwise the core's error with its action sentence.
+        /// </summary>
+        internal static FRGVersionControl.Core.IpcClient.IpcRawResult InvokeMutating(string op, string argsJson, out string error)
+        {
+            error = null;
+            FRGVersionControl.Core.IpcClient.IpcRawResult raw;
+            try
+            {
+                var client = FRGVersionControl.Core.FileLockManager.Instance.IpcClient;
+                if (!client.IsAvailable)
+                {
+                    error = "svn-core.exe is not available. Reinstall the package, then restart the editor.";
+                    return null;
+                }
+                raw = client.InvokeRawAsync(op, argsJson, client.BuildDefaultContext(), default, null, MainThreadBudget(op))
+                    .GetAwaiter().GetResult();
+            }
+            catch (Exception e)
+            {
+                error = $"{op} failed: {e.Message}. Refresh status to see the outcome before retrying.";
+                return null;
+            }
+            if (raw.Ok) return raw;
+            if (raw.Busy) error = "SVN is busy. Try again when the current operation finishes.";
+            else if (raw.StillRunning || raw.PipeLost) error = $"{raw.ErrorMessage?.Trim().TrimEnd('.')}. Refresh status to see the outcome before retrying.";
+            else error = string.IsNullOrEmpty(raw.ErrorDefaultAction) ? raw.ErrorMessage : $"{raw.ErrorMessage?.Trim()} {raw.ErrorDefaultAction}";
+            return raw;
+        }
+
+        internal static int? MainThreadBudget(string op) =>
             IsMainThread && FRGVersionControl.Core.IpcClient.IpcOpPolicy.Classify(op) != FRGVersionControl.Core.IpcClient.IpcOpClass.ReadOnly
                 ? FRGVersionControl.Core.IpcClient.IpcOpPolicy.MainThreadWaitBudgetMs
                 : (int?)null;
@@ -108,8 +137,8 @@ namespace FRGVersionControl.Core.Svn
                 var ctx = client.BuildDefaultContext();
                 var result = client.InvokeRawAsync("meta.version", "{}", ctx).GetAwaiter().GetResult();
                 if (!result.Ok) return false;
-                // result.RawLine contains `"svnVersion":"1.14.5"` or `"svnVersion":"not-found"`.
-                return !result.RawLine.Contains("\"svnVersion\":\"not-found\"");
+                var svnVersion = FRGVersionControl.Core.IpcClient.IpcJson.ReadScalar(result.RawLine, "svnVersion", inResult: true);
+                return !string.IsNullOrEmpty(svnVersion) && svnVersion != "not-found";
             }
             catch { return false; }
         }
@@ -290,18 +319,59 @@ namespace FRGVersionControl.Core.Svn
             }
         }
 
-        public static bool IsVersioned(string path)
+        public enum VersionedState
         {
+            Versioned,
+            Unversioned,
+            /// <summary>svn-core could not answer right now (busy with a long operation, timed out,
+            /// pipe lost): never treat as "unversioned".</summary>
+            Unknown,
+        }
+
+        public static bool IsVersioned(string path) => GetVersionedState(path, out _) == VersionedState.Versioned;
+
+        /// <summary>status.isVersioned as a tri-state. Only an answer from svn-core is definitive (a
+        /// genuinely unversioned path comes back ok with versioned:false); busy, still running, a
+        /// lost pipe or any error is <see cref="VersionedState.Unknown"/>, with a user-facing
+        /// <paramref name="reason"/>.</summary>
+        public static VersionedState GetVersionedState(string path, out string reason)
+        {
+            reason = null;
+            FRGVersionControl.Core.IpcClient.IpcRawResult result = null;
             try
             {
                 var client = FRGVersionControl.Core.FileLockManager.Instance.IpcClient;
-                if (!client.IsAvailable) return false;
-                var ctx = client.BuildDefaultContext();
-                var args = $"{{\"path\":\"{IpcEscape(path)}\"}}";
-                var result = client.InvokeRawAsync("status.isVersioned", args, ctx).GetAwaiter().GetResult();
-                return result.Ok && result.RawLine.Contains("\"versioned\":true");
+                if (client.IsAvailable)
+                {
+                    var args = $"{{\"path\":\"{IpcEscape(path)}\"}}";
+                    result = client.InvokeRawAsync("status.isVersioned", args, client.BuildDefaultContext()).GetAwaiter().GetResult();
+                }
             }
-            catch { return false; }
+            catch (Exception e)
+            {
+                reason = $"SVN could not check '{Path.GetFileName(path)}': {e.Message}. Try again; if it keeps failing, restart the editor.";
+                return VersionedState.Unknown;
+            }
+            var state = ClassifyVersioned(result);
+            if (state == VersionedState.Unknown) reason = UnknownReason(path, result);
+            return state;
+        }
+
+        internal static VersionedState ClassifyVersioned(FRGVersionControl.Core.IpcClient.IpcRawResult result)
+        {
+            if (result == null || !result.Ok) return VersionedState.Unknown;
+            return FRGVersionControl.Core.IpcClient.IpcJson.ReadScalar(result.RawLine, "versioned", inResult: true) == "true"
+                ? VersionedState.Versioned
+                : VersionedState.Unversioned;
+        }
+
+        private static string UnknownReason(string path, FRGVersionControl.Core.IpcClient.IpcRawResult result)
+        {
+            var file = Path.GetFileName(path);
+            if (result == null) return "svn-core.exe is not available. Reinstall the package, then restart the editor.";
+            if (result.Busy || result.StillRunning || result.PipeLost)
+                return $"An SVN operation is running, so SVN could not check '{file}'. Wait for it to finish, then try again.";
+            return $"SVN could not check '{file}': {result.ErrorMessage?.Trim()} {result.ErrorDefaultAction}".Trim();
         }
 
         // ====================================================================
@@ -744,7 +814,12 @@ namespace FRGVersionControl.Core.Svn
                 sb.Append("]}");
                 var result = client.InvokeRawAsync("mutate.prepareDelete", sb.ToString(), ctx).GetAwaiter().GetResult();
                 if (!result.Ok)
-                    return new PrepareDeleteResult { success = false, error = FormatIpcError(result, "prepareDelete") };
+                    return new PrepareDeleteResult
+                    {
+                        success = false,
+                        busy = result.Busy || result.StillRunning || result.PipeLost,
+                        error = FormatIpcError(result, "prepareDelete"),
+                    };
                 var shim = UnityEngine.JsonUtility.FromJson<IpcPrepareDeleteShim>(result.RawLine);
                 var r = shim?.result;
                 return new PrepareDeleteResult
@@ -895,12 +970,8 @@ namespace FRGVersionControl.Core.Svn
                 var args = $"{{\"path\":\"{IpcEscape(path)}\",\"revision\":{revision}}}";
                 var result = client.InvokeRawAsync("hist.exportRevision", args, ctx).GetAwaiter().GetResult();
                 if (!result.Ok) return null;
-                int idx = result.RawLine.IndexOf("\"tempPath\":\"", StringComparison.Ordinal);
-                if (idx < 0) return null;
-                int start = idx + "\"tempPath\":\"".Length;
-                int end = result.RawLine.IndexOf('"', start);
-                if (end <= start) return null;
-                return result.RawLine.Substring(start, end - start).Replace("\\\\", "\\").Replace("\\/", "/");
+                var tempPath = FRGVersionControl.Core.IpcClient.IpcJson.ReadScalar(result.RawLine, "tempPath", inResult: true);
+                return string.IsNullOrEmpty(tempPath) ? null : tempPath;
             }
             catch (Exception ex)
             {
@@ -1201,7 +1272,7 @@ namespace FRGVersionControl.Core.Svn
                 : result.ErrorMessage ?? result.ErrorKind ?? $"{op} failed";
         }
 
-        private static string IpcEscape(string s)
+        internal static string IpcEscape(string s)
         {
             if (string.IsNullOrEmpty(s)) return "";
             var sb = new StringBuilder(s.Length);
@@ -1388,6 +1459,8 @@ namespace FRGVersionControl.Core.Svn
     public class PrepareDeleteResult
     {
         public bool success;
+        /// <summary>svn-core could not answer right now (busy, still running, pipe lost).</summary>
+        public bool busy;
         public string error;
         public string[] reverted = new string[0];
         public IpcPrepareDeleteVersioned[] versioned = new IpcPrepareDeleteVersioned[0];

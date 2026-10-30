@@ -304,6 +304,64 @@ namespace FRGVersionControl.Core.IpcClient
             return -1;
         }
 
+        /// <summary>Index of the opening quote of key <paramref name="name"/> directly inside the
+        /// object that opens at <paramref name="objectOpen"/> — never a key of a nested object or
+        /// text inside a string value; -1 when absent.</summary>
+        public static int FindKeyInObject(string s, int objectOpen, string name)
+        {
+            if (objectOpen < 0 || objectOpen >= s.Length || s[objectOpen] != '{') return -1;
+            int depth = 0;
+            for (int i = objectOpen; i < s.Length; i++)
+            {
+                char c = s[i];
+                if (c == '"')
+                {
+                    int end = StringEnd(s, i);
+                    if (end < 0) return -1;
+                    if (depth == 1)
+                    {
+                        int j = SkipWhitespace(s, end + 1);
+                        if (j < s.Length && s[j] == ':' && end - i - 1 == name.Length &&
+                            string.CompareOrdinal(s, i + 1, name, 0, name.Length) == 0)
+                        {
+                            return i;
+                        }
+                    }
+                    i = end;
+                    continue;
+                }
+                if (c == '{' || c == '[') depth++;
+                else if (c == '}' || c == ']') { depth--; if (depth == 0) return -1; }
+            }
+            return -1;
+        }
+
+        /// <summary>Key <paramref name="name"/> of the frame's top-level object.</summary>
+        public static int FindTopLevelKey(string s, string name)
+            => s == null ? -1 : FindKeyInObject(s, SkipWhitespace(s, 0), name);
+
+        /// <summary>The literal value (true/false/number/null) or decoded string of a top-level
+        /// key, or of <c>result.&lt;name&gt;</c> when <paramref name="inResult"/> is true; null when absent.</summary>
+        public static string ReadScalar(string s, string name, bool inResult = false)
+        {
+            if (string.IsNullOrEmpty(s)) return null;
+            int obj = SkipWhitespace(s, 0);
+            if (inResult)
+            {
+                int r = FindKeyInObject(s, obj, "result");
+                if (r < 0) return null;
+                obj = SkipWhitespace(s, AfterColon(s, r));
+            }
+            int k = FindKeyInObject(s, obj, name);
+            if (k < 0) return null;
+            int v = SkipWhitespace(s, AfterColon(s, k));
+            if (v >= s.Length) return null;
+            if (s[v] == '"') return ReadString(s, v, out _);
+            int e = v;
+            while (e < s.Length && s[e] != ',' && s[e] != '}' && s[e] != ']' && !char.IsWhiteSpace(s[e])) e++;
+            return s.Substring(v, e - v);
+        }
+
         public static int AfterColon(string s, int keyQuote)
         {
             int end = StringEnd(s, keyQuote);

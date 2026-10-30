@@ -109,6 +109,7 @@ namespace FRGVersionControl.Tests
         }
 
         [Test]
+        [Category("RequiresSvn")]
         public void TestSvnCommandRunner()
         {
             // Phase 2 Step H: replaced TestGitCommandRunner. SvnCommandRunner is the only

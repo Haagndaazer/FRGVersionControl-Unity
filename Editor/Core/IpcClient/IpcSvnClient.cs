@@ -261,6 +261,7 @@ namespace FRGVersionControl.Core.IpcClient
                 {
                     Op = op,
                     Ok = false,
+                    PipeLost = true,
                     ErrorKind = "protocol",
                     ErrorMessage = "svn-core.exe exited without a terminal response frame",
                     ErrorDefaultAction = IpcOpPolicy.PipeLostAction,
@@ -300,6 +301,7 @@ namespace FRGVersionControl.Core.IpcClient
         {
             Op = op,
             Ok = false,
+            PipeLost = true,
             ErrorKind = "protocol",
             ErrorMessage = IpcOpPolicy.PipeLostMessage(op),
             ErrorDefaultAction = IpcOpPolicy.PipeLostAction,
@@ -340,13 +342,7 @@ namespace FRGVersionControl.Core.IpcClient
             // Cheap structural parse — we only need ok, error.kind, error.message.
             // Full result text is preserved verbatim for the caller to display.
             var result = new IpcRawResult { Op = op, RawLine = line, ElapsedMs = elapsedMs };
-            int okIdx = line.IndexOf("\"ok\":", StringComparison.Ordinal);
-            if (okIdx >= 0)
-            {
-                // ok value follows ":" — either true, false, or whitespace+value
-                var slice = line.Substring(okIdx + 5).TrimStart();
-                result.Ok = slice.StartsWith("true", StringComparison.Ordinal);
-            }
+            result.Ok = IpcJson.ReadScalar(line, "ok") == "true";
             if (!result.Ok)
             {
                 // Pull out kind / message via JsonUtility on a minimal wrapper.
@@ -814,7 +810,7 @@ namespace FRGVersionControl.Core.IpcClient
 
                     var id = ExtractId(line);
                     if (id == null) continue;
-                    bool terminal = line.IndexOf("\"ok\"", StringComparison.Ordinal) >= 0;
+                    bool terminal = IsTerminalFrame(line);
 
                     if (!terminal)
                     {
@@ -878,13 +874,13 @@ namespace FRGVersionControl.Core.IpcClient
 
         private static string ExtractId(string line)
         {
-            var idIdx = line.IndexOf("\"id\":\"", StringComparison.Ordinal);
-            if (idIdx < 0) return null;
-            var idStart = idIdx + "\"id\":\"".Length;
-            var idEnd = line.IndexOf('"', idStart);
-            if (idEnd <= idStart) return null;
-            return line.Substring(idStart, idEnd - idStart);
+            try { return IpcJson.ReadScalar(line, "id"); }
+            catch (FormatException) { return null; }
         }
+
+        /// <summary>A terminal frame has a top-level "ok"; a progress frame never does (a file
+        /// named "ok" inside a progress message must not end the request).</summary>
+        internal static bool IsTerminalFrame(string line) => IpcJson.FindTopLevelKey(line, "ok") >= 0;
 
         private static void ReportProgressFrame(IProgress<string> progress, string line)
         {
@@ -931,7 +927,7 @@ namespace FRGVersionControl.Core.IpcClient
                         if (string.IsNullOrWhiteSpace(line)) continue;
                         // We treat any line containing `"ok":` as terminal. Progress frames
                         // contain `"progress"` instead; for this minimal client they're skipped.
-                        if (line.IndexOf("\"ok\"", StringComparison.Ordinal) >= 0)
+                        if (IsTerminalFrame(line))
                         {
                             terminalLine = line;
                         }
@@ -953,6 +949,9 @@ namespace FRGVersionControl.Core.IpcClient
         public bool Ok;
         public bool Busy;
         public bool StillRunning;
+        /// <summary>The pipe to svn-core broke or ended before a terminal frame arrived: a
+        /// mutating request may or may not have been applied.</summary>
+        public bool PipeLost;
         public string RawLine;
         public string ErrorKind;
         public string ErrorMessage;

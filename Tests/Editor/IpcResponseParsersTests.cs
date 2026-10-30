@@ -163,9 +163,7 @@ namespace FRGVersionControl.Tests
         {
             var json = @"{""v"":1,""id"":""u"",""ok"":true,""result"":{""props"":{" +
                        @"""svn:needs-lock"":""*""," +
-                       @"""svn:ignore"":""Library
-Temp
-""," +
+                       @"""svn:ignore"":""Library\nTemp\n""," +
                        @"""frg:notes"":""say \""hi\"" Bob" + U + @"0027s }]""}}}";
             var m = IpcResponseParsers.ParseStringMap(json, "props");
             Assert.AreEqual(3, m.Count);

@@ -71,8 +71,8 @@ namespace FRGVersionControl.Core
 
         public static bool AutoLockEnabled
         {
-            get => EditorPrefs.GetBool(AUTO_LOCK_PREF_KEY, true);
-            set => EditorPrefs.SetBool(AUTO_LOCK_PREF_KEY, value);
+            get => ProjectPrefs.GetBool(AUTO_LOCK_PREF_KEY, true);
+            set => ProjectPrefs.SetBool(AUTO_LOCK_PREF_KEY, value);
         }
 
         // ====================================================================
@@ -237,7 +237,7 @@ namespace FRGVersionControl.Core
                     {
                         if (!string.IsNullOrEmpty(email))
                         {
-                            m_AdminEmails.Add(email.ToLower());
+                            m_AdminEmails.Add(email.ToLowerInvariant());
                         }
                     }
                 }
@@ -283,7 +283,7 @@ namespace FRGVersionControl.Core
                     {
                         if (!string.IsNullOrEmpty(ext))
                         {
-                            m_LockableExtensions.Add(ext.ToLower());
+                            m_LockableExtensions.Add(ext.ToLowerInvariant());
                         }
                     }
                     Debug.Log($"[FRGVersionControl] Loaded {m_LockableExtensions.Count} lockable file type(s)");
@@ -327,7 +327,7 @@ namespace FRGVersionControl.Core
         /// </summary>
         public bool IsUserAdmin()
         {
-            return m_AdminEmails.Contains(m_UserEmail?.ToLower());
+            return m_AdminEmails.Contains(m_UserEmail?.ToLowerInvariant());
         }
 
         /// <summary>
@@ -353,7 +353,7 @@ namespace FRGVersionControl.Core
             if (m_LockableExtensions.Count == 0)
                 return true;
 
-            string ext = Path.GetExtension(assetPath)?.ToLower();
+            string ext = Path.GetExtension(assetPath)?.ToLowerInvariant();
             return !string.IsNullOrEmpty(ext) && m_LockableExtensions.Contains(ext);
         }
 

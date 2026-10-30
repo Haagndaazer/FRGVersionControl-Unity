@@ -1,176 +1,144 @@
 using System;
 using System.Collections.Generic;
-using System.IO;
+using System.Linq;
 using UnityEngine;
 using FRGVersionControl.Core.Svn;
 
 namespace FRGVersionControl.Core.Changelists
 {
     /// <summary>
-    /// Sidecar for user-created changelist NAMES that aren't yet (or are no longer) backed by
-    /// any file membership. SVN garbage-collects a changelist when its last file leaves, but
-    /// the TortoiseSVN UX shows a name immediately on creation. To match without subverting SVN,
-    /// persist user-created names here; SVN's wc.db remains source-of-truth for membership.
+    /// User-created changelist NAMES that aren't yet (or are no longer) backed by any file
+    /// membership. SVN garbage-collects a changelist when its last file leaves, but the
+    /// TortoiseSVN UX shows a name immediately on creation, so svn-core keeps the declared names
+    /// in its sidecar (SVN_CORE_API.md §5.6); SVN's wc.db remains the source of truth for
+    /// membership. Names are working-copy-wide, like svn changelists.
     ///
-    /// Sidecar path: `.svn/user-changelists.json` (same `.svn/` precedent as the override
-    /// registry — finding ffe84603273a established that `.svn/` survives status/cleanup/
-    /// vacuum-pristines and is never `svn add`-ed).
-    ///
-    /// 0.2.60 — IPC-routed via cl.userListGet/Set/Add/Remove/Rename. The legacy JsonUtility
-    /// path is preserved as a fallback for cases where the IPC binary is unavailable.
+    /// Since 0.2.92 this is a pure IPC shim (cl.userListGet/Add/Remove/Rename) with a last-good
+    /// cache for drawing: the editor never reads or writes the sidecar itself.
     /// </summary>
     public static class UserChangelistStore
     {
-        private const string SIDECAR_RELATIVE_PATH = ".svn/user-changelists.json";
-
-        private static readonly object s_StoreLock = new object();
-
-        public static string GetSidecarPath()
+        public struct Outcome
         {
-            return Path.Combine(SvnCommandRunner.ProjectRoot, SIDECAR_RELATIVE_PATH);
+            public bool ok;
+            public bool changed;
+            public string error;
         }
 
-        public static void WithLock(Action<List<string>> mutator)
-        {
-            lock (s_StoreLock)
-            {
-                var names = ReadSnapshot();
-                mutator(names);
-                WriteAll(names);
-            }
-        }
+        private const double RefreshAfterSeconds = 5.0;
+        private const double FailedRetrySeconds = 1.0;
+        private const double WarnEverySeconds = 60.0;
 
+        private static readonly object s_Lock = new object();
+        private static List<string> s_Cache;
+        private static DateTime s_CachedAt = DateTime.MinValue;
+        private static DateTime s_LastWarn = DateTime.MinValue;
+
+        /// <summary>The declared names. Re-read from svn-core at most every few seconds; when the
+        /// read fails (svn-core busy or unavailable) the last good list is returned.</summary>
         public static List<string> ReadSnapshot()
         {
-            // Try IPC first.
-            var ipc = TryIpcGet();
-            if (ipc != null) return ipc;
-            lock (s_StoreLock)
+            lock (s_Lock)
             {
-                return LoadInternal();
-            }
-        }
-
-        public static void WriteAll(List<string> names)
-        {
-            // Try IPC first.
-            if (TryIpcSet(names)) return;
-            lock (s_StoreLock)
-            {
-                SaveInternal(names);
-            }
-        }
-
-        private static List<string> TryIpcGet()
-        {
-            try
-            {
-                var client = FRGVersionControl.Core.FileLockManager.Instance.IpcClient;
-                if (!client.IsAvailable) return null;
-                var ctx = client.BuildDefaultContext();
-                var result = client.InvokeRawAsync("cl.userListGet", "{}", ctx).GetAwaiter().GetResult();
-                if (!result.Ok) return null;
-                return FRGVersionControl.Core.IpcClient.IpcResponseParsers.ParseNamesArray(result.RawLine);
-            }
-            catch { return null; }
-        }
-
-        private static bool TryIpcSet(List<string> names)
-        {
-            try
-            {
-                var client = FRGVersionControl.Core.FileLockManager.Instance.IpcClient;
-                if (!client.IsAvailable) return false;
-                var ctx = client.BuildDefaultContext();
-                var sb = new System.Text.StringBuilder("{\"names\":[");
-                for (int i = 0; i < names.Count; i++)
+                if ((DateTime.UtcNow - s_CachedAt).TotalSeconds < RefreshAfterSeconds)
                 {
-                    if (i > 0) sb.Append(",");
-                    sb.Append("\"").Append(IpcEscape(names[i])).Append("\"");
-                }
-                sb.Append("]}");
-                var result = client.InvokeRawAsync("cl.userListSet", sb.ToString(), ctx).GetAwaiter().GetResult();
-                return result.Ok;
-            }
-            catch { return false; }
-        }
-
-        private static string IpcEscape(string s)
-        {
-            if (string.IsNullOrEmpty(s)) return "";
-            var sb = new System.Text.StringBuilder(s.Length);
-            foreach (var c in s)
-            {
-                switch (c)
-                {
-                    case '"': sb.Append("\\\""); break;
-                    case '\\': sb.Append("\\\\"); break;
-                    case '\n': sb.Append("\\n"); break;
-                    case '\r': sb.Append("\\r"); break;
-                    default:
-                        if (c < 0x20) sb.AppendFormat("\\u{0:x4}", (int)c);
-                        else sb.Append(c);
-                        break;
+                    return s_Cache != null ? new List<string>(s_Cache) : new List<string>();
                 }
             }
-            return sb.ToString();
-        }
 
-        // Legacy JsonUtility fallback ----------------------------------------
-
-        private static List<string> LoadInternal()
-        {
-            string path = GetSidecarPath();
-            if (!File.Exists(path))
-            {
-                return new List<string>();
-            }
+            string error = null;
+            List<string> names = null;
             try
             {
-                string json = File.ReadAllText(path);
-                if (string.IsNullOrWhiteSpace(json))
+                var client = FileLockManager.Instance.IpcClient;
+                if (client.IsAvailable)
                 {
-                    return new List<string>();
+                    var result = client.InvokeRawAsync("cl.userListGet", "{}", client.BuildDefaultContext()).GetAwaiter().GetResult();
+                    if (result.Ok) names = IpcClient.IpcResponseParsers.ParseNamesArray(result.RawLine);
+                    else error = result.ErrorMessage;
                 }
-                var envelope = JsonUtility.FromJson<UserChangelistEnvelope>(json);
-                return envelope?.names ?? new List<string>();
+                else
+                {
+                    error = "svn-core.exe is not available";
+                }
             }
             catch (Exception e)
             {
-                Debug.LogError($"[FRGVersionControl.Changelists] Sidecar parse failed at {path}: {e.Message}. " +
-                               "Returning empty list — file on disk left intact for manual recovery.");
-                return new List<string>();
+                error = e.Message;
             }
-        }
 
-        private static void SaveInternal(List<string> names)
-        {
-            string path = GetSidecarPath();
-            string tmp = path + ".tmp";
-            try
+            lock (s_Lock)
             {
-                Directory.CreateDirectory(Path.GetDirectoryName(path));
-                var envelope = new UserChangelistEnvelope { names = names };
-                string json = JsonUtility.ToJson(envelope, true);
-                File.WriteAllText(tmp, json);
-                if (File.Exists(path))
+                if (names != null)
                 {
-                    File.Delete(path);
+                    s_Cache = names;
+                    s_CachedAt = DateTime.UtcNow;
+                    return new List<string>(names);
                 }
-                File.Move(tmp, path);
-            }
-            catch (Exception e)
-            {
-                Debug.LogError($"[FRGVersionControl.Changelists] Failed to persist sidecar: {e.Message}");
-                try { if (File.Exists(tmp)) File.Delete(tmp); } catch { }
-                throw;
+                s_CachedAt = DateTime.UtcNow - TimeSpan.FromSeconds(RefreshAfterSeconds - FailedRetrySeconds);
+                if ((DateTime.UtcNow - s_LastWarn).TotalSeconds >= WarnEverySeconds)
+                {
+                    s_LastWarn = DateTime.UtcNow;
+                    Debug.LogWarning($"[FRGVersionControl] Could not read the changelist names ({error}); showing the last known list.");
+                }
+                return s_Cache != null ? new List<string>(s_Cache) : new List<string>();
             }
         }
-    }
 
-    [Serializable]
-    internal class UserChangelistEnvelope
-    {
-        public List<string> names = new List<string>();
+        public static Outcome Add(string name)
+        {
+            var outcome = Mutate("cl.userListAdd", "{\"name\":\"" + SvnCommandRunner.IpcEscape(name) + "\"}", "added");
+            if (outcome.ok) UpdateCache(names => { if (!names.Contains(name, StringComparer.Ordinal)) names.Add(name); });
+            return outcome;
+        }
+
+        public static Outcome Remove(string name)
+        {
+            var outcome = Mutate("cl.userListRemove", "{\"name\":\"" + SvnCommandRunner.IpcEscape(name) + "\"}", "removed");
+            if (outcome.ok) UpdateCache(names => names.RemoveAll(n => string.Equals(n, name, StringComparison.Ordinal)));
+            return outcome;
+        }
+
+        public static Outcome Rename(string from, string to)
+        {
+            var outcome = Mutate("cl.userListRename",
+                "{\"from\":\"" + SvnCommandRunner.IpcEscape(from) + "\",\"to\":\"" + SvnCommandRunner.IpcEscape(to) + "\"}", "renamed");
+            if (outcome.ok)
+            {
+                UpdateCache(names =>
+                {
+                    names.RemoveAll(n => string.Equals(n, from, StringComparison.Ordinal));
+                    if (!names.Contains(to, StringComparer.Ordinal)) names.Add(to);
+                });
+            }
+            return outcome;
+        }
+
+        private static Outcome Mutate(string op, string argsJson, string changedField)
+        {
+            var raw = SvnCommandRunner.InvokeMutating(op, argsJson, out var error);
+            if (error != null)
+            {
+                Invalidate();
+                return new Outcome { ok = false, error = error };
+            }
+            bool changed = IpcClient.IpcJson.ReadScalar(raw.RawLine, changedField, inResult: true) == "true";
+            return new Outcome { ok = true, changed = changed };
+        }
+
+        private static void UpdateCache(Action<List<string>> change)
+        {
+            lock (s_Lock)
+            {
+                if (s_Cache == null) return;
+                change(s_Cache);
+                s_CachedAt = DateTime.UtcNow;
+            }
+        }
+
+        private static void Invalidate()
+        {
+            lock (s_Lock) s_CachedAt = DateTime.MinValue;
+        }
     }
 }

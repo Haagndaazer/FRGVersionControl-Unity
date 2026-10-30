@@ -46,7 +46,7 @@ namespace FRGVersionControl.Services
 
         public DateTime GetTimestamp()
         {
-            return DateTime.Parse(timestamp).ToUniversalTime();
+            return DateTime.Parse(timestamp, System.Globalization.CultureInfo.InvariantCulture, System.Globalization.DateTimeStyles.RoundtripKind).ToUniversalTime();
         }
     }
 
@@ -71,7 +71,16 @@ namespace FRGVersionControl.Services
         {
             try
             {
-                s_CachedHistoryFilePath = Path.Combine(Application.persistentDataPath, "FileLockHistory.json");
+                // persistentDataPath is shared by every checkout of the same product (trunk and a
+                // branch in one checkout, two clones), so the file is keyed by the project folder.
+                // A history saved before per-project files existed seeds this project's file once.
+                string projectHash = ProjectPrefs.HashOf(ProjectFolder.FromDataPath(Application.dataPath));
+                s_CachedHistoryFilePath = Path.Combine(Application.persistentDataPath, "FileLockHistory-" + projectHash + ".json");
+                string legacy = Path.Combine(Application.persistentDataPath, "FileLockHistory.json");
+                if (!File.Exists(s_CachedHistoryFilePath) && File.Exists(legacy))
+                {
+                    try { File.Copy(legacy, s_CachedHistoryFilePath); } catch { }
+                }
                 // Now that the path is known, load the on-disk history. Main thread guaranteed.
                 LoadHistory();
             }
@@ -319,10 +328,13 @@ namespace FRGVersionControl.Services
                 try
                 {
                     string json = File.ReadAllText(path);
-                    s_History = JsonUtility.FromJson<LockHistory>(json);
+                    s_History = JsonUtility.FromJson<LockHistory>(json) ?? new LockHistory();
                 }
-                catch
+                catch (Exception e)
                 {
+                    // Keep the unreadable file instead of overwriting it on the next save.
+                    try { File.Move(path, path + ".corrupt-" + DateTime.UtcNow.ToString("yyyyMMddTHHmmssZ", System.Globalization.CultureInfo.InvariantCulture)); } catch { }
+                    Debug.LogWarning($"[FRGVersionControl] Local lock history could not be read ({e.Message}); it was set aside and a new one started.");
                     s_History = new LockHistory();
                 }
             }
@@ -337,7 +349,11 @@ namespace FRGVersionControl.Services
             try
             {
                 string json = JsonUtility.ToJson(s_History, true);
-                File.WriteAllText(HistoryFilePath, json);
+                string path = HistoryFilePath;
+                string tmp = path + ".tmp";
+                File.WriteAllText(tmp, json);
+                if (File.Exists(path)) File.Replace(tmp, path, null);
+                else File.Move(tmp, path);
             }
             catch (Exception e)
             {

@@ -108,7 +108,7 @@ namespace FRGVersionControl.UI
             // and breaks RefreshLockCache for the session.
 
             // Initialize git status cache
-            s_GlobalSvnStatusCache = new System.Collections.Generic.Dictionary<string, SvnFileStatus>();
+            s_GlobalSvnStatusCache = new System.Collections.Generic.Dictionary<string, SvnFileStatus>(PathKey.Comparer);
 
             // Register callbacks
             EditorApplication.projectWindowItemOnGUI -= OnProjectWindowItemGUI;
@@ -250,12 +250,15 @@ namespace FRGVersionControl.UI
             // on the next editor tick — guaranteed main thread.
             try
             {
-                RefreshGlobalSvnStatusCache();
-                EditorApplication.delayCall += () =>
+                SvnCommandRunner.s_UnityMainSync.Post(_ =>
                 {
-                    try { EditorApplication.RepaintProjectWindow(); }
-                    catch { /* defensive — editor torn down mid-tick */ }
-                };
+                    ScheduleRefreshGlobalSvnStatusCache();
+                    EditorApplication.delayCall += () =>
+                    {
+                        try { EditorApplication.RepaintProjectWindow(); }
+                        catch { /* defensive — editor torn down mid-tick */ }
+                    };
+                }, null);
             }
             catch (System.Exception ex)
             {
@@ -316,12 +319,12 @@ namespace FRGVersionControl.UI
             }
             // SVN emits paths with backslashes on Windows; Unity asset paths use forward slashes.
             // Normalize at insert time so cache lookups by Unity asset path match.
-            s_GlobalSvnStatusCache = new System.Collections.Generic.Dictionary<string, SvnFileStatus>(rawSvn.Count);
+            var fresh = new System.Collections.Generic.Dictionary<string, SvnFileStatus>(rawSvn.Count, PathKey.Comparer);
             foreach (var kv in rawSvn)
             {
-                var key = (kv.Key ?? "").Replace('\\', '/');
-                s_GlobalSvnStatusCache[key] = kv.Value;
+                fresh[PathKey.Normalize(kv.Key)] = kv.Value;
             }
+            s_GlobalSvnStatusCache = fresh;
             s_CacheInitialized = true;
         }
 

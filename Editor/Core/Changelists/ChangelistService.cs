@@ -25,6 +25,9 @@ namespace FRGVersionControl.Core.Changelists
         /// <c>FileLockOverrideManager</c>.</summary>
         public const string ReservedChangelistName = "ignore-on-commit";
 
+        /// <summary>The Changes tab's label for files that are in no changelist.</summary>
+        public const string NoChangelistBucketName = "(no changelist)";
+
         public enum DeleteMode
         {
             /// <summary>Refuse delete if any file is still assigned to the changelist.</summary>
@@ -74,6 +77,10 @@ namespace FRGVersionControl.Core.Changelists
                     return ValidationResult.Fail("Changelist name cannot contain control characters.");
                 }
             }
+            if (string.Equals(name.Trim(), NoChangelistBucketName, StringComparison.OrdinalIgnoreCase))
+            {
+                return ValidationResult.Fail($"'{NoChangelistBucketName}' is the label for files without a changelist. Pick a different name.");
+            }
             if (name.IndexOfAny(new[] { '"', '\\', '/', '\n', '\r', '\t' }) >= 0)
             {
                 return ValidationResult.Fail("Changelist name cannot contain quotes, slashes, or whitespace characters.");
@@ -89,16 +96,9 @@ namespace FRGVersionControl.Core.Changelists
             var v = ValidateName(name);
             if (!v.ok) return v;
 
-            bool added = false;
-            UserChangelistStore.WithLock(names =>
-            {
-                if (!names.Any(n => string.Equals(n, name, StringComparison.Ordinal)))
-                {
-                    names.Add(name);
-                    added = true;
-                }
-            });
-            if (!added)
+            var outcome = UserChangelistStore.Add(name);
+            if (!outcome.ok) return ValidationResult.Fail(outcome.error);
+            if (!outcome.changed)
             {
                 return ValidationResult.Fail($"Changelist '{name}' already exists.");
             }
@@ -142,15 +142,8 @@ namespace FRGVersionControl.Core.Changelists
                 }
             }
 
-            UserChangelistStore.WithLock(names =>
-            {
-                names.RemoveAll(n => string.Equals(n, oldName, StringComparison.Ordinal));
-                if (!names.Any(n => string.Equals(n, newName, StringComparison.Ordinal)))
-                {
-                    names.Add(newName);
-                }
-            });
-            return ValidationResult.Ok();
+            var outcome = UserChangelistStore.Rename(oldName, newName);
+            return outcome.ok ? ValidationResult.Ok() : ValidationResult.Fail(outcome.error);
         }
 
         /// <summary>Delete a user changelist. <see cref="DeleteMode.RemoveOnlyIfEmpty"/> refuses
@@ -185,11 +178,8 @@ namespace FRGVersionControl.Core.Changelists
                 }
             }
 
-            UserChangelistStore.WithLock(names =>
-            {
-                names.RemoveAll(n => string.Equals(n, name, StringComparison.Ordinal));
-            });
-            return ValidationResult.Ok();
+            var outcome = UserChangelistStore.Remove(name);
+            return outcome.ok ? ValidationResult.Ok() : ValidationResult.Fail(outcome.error);
         }
 
         /// <summary>Assign paths to a changelist. Blocks any attempt to target the reserved
@@ -211,13 +201,11 @@ namespace FRGVersionControl.Core.Changelists
                     $"SVN assign failed: {result.error?.Trim()}. Check that the paths are versioned and the WC isn't locked.");
             }
 
-            UserChangelistStore.WithLock(names =>
+            var outcome = UserChangelistStore.Add(changelist);
+            if (!outcome.ok)
             {
-                if (!names.Any(n => string.Equals(n, changelist, StringComparison.Ordinal)))
-                {
-                    names.Add(changelist);
-                }
-            });
+                UnityEngine.Debug.LogWarning($"[FRGVersionControl] Files were assigned to '{changelist}', but the name could not be saved as a declared changelist: {outcome.error}");
+            }
             return ValidationResult.Ok();
         }
 

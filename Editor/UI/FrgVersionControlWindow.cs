@@ -98,13 +98,29 @@ namespace FRGVersionControl.UI
         private Vector2 m_Scroll;
         private string m_CommitMessage = "";
         private CancellationTokenSource m_OpCts;
-        private string m_StatusBanner = "";  // shown at the bottom for "Refreshing…" / "Committing 3 files…" / errors
+        private string m_StatusBannerText = "";  // shown at the bottom for "Refreshing…" / "Committing 3 files…" / errors
+        private bool m_StatusBannerIsError;
+
+        /// <summary>Informational banner text; assigning it clears the error style. Failures go
+        /// through <see cref="ShowErrorBanner"/> / <see cref="SetErrorBanner"/>, so the severity is
+        /// explicit instead of guessed from the wording.</summary>
+        private string m_StatusBanner
+        {
+            get => m_StatusBannerText;
+            set { m_StatusBannerText = value ?? ""; m_StatusBannerIsError = false; }
+        }
+
+        private void ShowErrorBanner(string text)
+        {
+            m_StatusBannerText = text ?? "";
+            m_StatusBannerIsError = true;
+        }
 
         // Override-row selection lives in a SEPARATE set from r.selected (regular-change
         // selection). The two lists are independent: Commit Selected only touches regular
         // changes; Clear Selected Overrides only touches this set. Reset on Rebuild so
         // stale paths (resolved/converted overrides) don't linger.
-        private HashSet<string> m_SelectedOverridePaths = new HashSet<string>();
+        private HashSet<string> m_SelectedOverridePaths = new HashSet<string>(PathKey.Comparer);
 
         // Slice 1: per-changelist-group foldout state. Default expanded. Survives rebuilds.
         // Keyed by group name (NO_CHANGELIST_GROUP_NAME / user changelist name).
@@ -165,12 +181,13 @@ namespace FRGVersionControl.UI
         private double m_CacheReadAt = 0;
         private long m_CachedCacheBytes = -1;
         private int m_CachedCacheCount = 0;
+        private bool m_PristineMeasuring;
 
         // ----- Lifecycle -----
         private void OnEnable()
         {
-            m_ActiveTab = (Tab)EditorPrefs.GetInt(TAB_PREFS_KEY, 0);
-            m_ChangesSearchFilter = EditorPrefs.GetString(CHANGES_SEARCH_PREFS_KEY, "");
+            m_ActiveTab = (Tab)ProjectPrefs.GetInt(TAB_PREFS_KEY, 0);
+            m_ChangesSearchFilter = ProjectPrefs.GetString(CHANGES_SEARCH_PREFS_KEY, "");
             SvnStatusCache.SnapshotUpdated += OnSnapshotUpdated;
             EnsureConflictIconLoaded();
             // Trigger an initial refresh so the panel populates on first open.
@@ -289,7 +306,7 @@ namespace FRGVersionControl.UI
                     }
                     else
                     {
-                        m_StatusBanner = $"Couldn't delete '{name}': {v.reason}";
+                        ShowErrorBanner($"Couldn't delete '{name}': {v.reason}");
                     }
                     Repaint();
                 }
@@ -300,17 +317,18 @@ namespace FRGVersionControl.UI
         {
             // Preserve selection + expansion state + preview textures across rebuilds.
             // Rows whose path no longer appears in the new snapshot get their textures destroyed.
-            var oldByPath = m_Rows.ToDictionary(r => r.path, r => r);
+            var oldByPath = new Dictionary<string, Row>(PathKey.Comparer);
+            foreach (var r in m_Rows) oldByPath[PathKey.Normalize(r.path)] = r;
 
             var snapshot = SvnStatusCache.SnapshotAll();
             var lockMgr = FileLockManager.Instance;
             var overrideMgr = FileLockOverrideManager.Instance;
-            var newPaths = new HashSet<string>(snapshot.Select(kv => kv.Key));
+            var newPaths = new HashSet<string>(snapshot.Select(kv => PathKey.Normalize(kv.Key)), PathKey.Comparer);
 
             // Texture-lifetime cleanup: rows abandoned in the rebuild lose their Texture2D refs.
             foreach (var oldRow in m_Rows)
             {
-                if (!newPaths.Contains(oldRow.path))
+                if (!newPaths.Contains(PathKey.Normalize(oldRow.path)))
                 {
                     ClearRowPreviews(oldRow);
                 }
@@ -361,15 +379,16 @@ namespace FRGVersionControl.UI
             // construction" assumption was wrong). An override-active file that hasn't been
             // edited yet won't appear in the snapshot at all, so we need to add synthetic rows
             // for any override path missing from the snapshot.
-            var rowPaths = new HashSet<string>(m_Rows.Select(r => r.path));
+            var rowPaths = new HashSet<string>(m_Rows.Select(r => PathKey.Normalize(r.path)), PathKey.Comparer);
             if (overrideMgr != null)
             {
                 foreach (var entry in overrideMgr.GetAllOverrides())
                 {
-                    if (rowPaths.Contains(entry.path)) continue;
-                    var fl = lockMgr != null && lockMgr.IsInitialized ? lockMgr.GetFileLock(entry.path) : null;
+                    var entryPath = PathKey.Normalize(entry.path);
+                    if (!rowPaths.Add(entryPath)) continue;
+                    var fl = lockMgr != null && lockMgr.IsInitialized ? lockMgr.GetFileLock(entryPath) : null;
                     Row syntheticRow;
-                    if (oldByPath.TryGetValue(entry.path, out var prev))
+                    if (oldByPath.TryGetValue(entryPath, out var prev))
                     {
                         syntheticRow = prev;
                         syntheticRow.status = SvnFileStatus.None;
@@ -381,7 +400,7 @@ namespace FRGVersionControl.UI
                     {
                         syntheticRow = new Row
                         {
-                            path = entry.path,
+                            path = entryPath,
                             status = SvnFileStatus.None,
                             lockOwner = fl?.owner,
                             lockState = fl?.lockState,
@@ -396,8 +415,8 @@ namespace FRGVersionControl.UI
 
             // Prune the override-selection set: drop any paths no longer in the override set
             // (resolved / cleared / converted-to-lock since last rebuild).
-            var overridePathsNow = new HashSet<string>(m_Rows.Where(r => r.isOverride).Select(r => r.path));
-            m_SelectedOverridePaths.RemoveWhere(p => !overridePathsNow.Contains(p));
+            var overridePathsNow = new HashSet<string>(m_Rows.Where(r => r.isOverride).Select(r => PathKey.Normalize(r.path)), PathKey.Comparer);
+            m_SelectedOverridePaths.RemoveWhere(p => !overridePathsNow.Contains(PathKey.Normalize(p)));
 
             // Sort tiers: Conflicts (0) > Modified/Added/Deleted/Replaced (1) > Untracked (2)
             // > Overrides (3, pushed to bottom) > else (4). Overrides live below regular
@@ -560,7 +579,7 @@ namespace FRGVersionControl.UI
             if (newTab != (int)m_ActiveTab)
             {
                 m_ActiveTab = (Tab)newTab;
-                EditorPrefs.SetInt(TAB_PREFS_KEY, newTab);
+                ProjectPrefs.SetInt(TAB_PREFS_KEY, newTab);
                 m_SelectedLockPaths.Clear(); // selection state is per-tab; reset on switch
             }
 
@@ -1061,7 +1080,7 @@ namespace FRGVersionControl.UI
             if (newFilter != m_ChangesSearchFilter)
             {
                 m_ChangesSearchFilter = newFilter;
-                EditorPrefs.SetString(CHANGES_SEARCH_PREFS_KEY, m_ChangesSearchFilter ?? "");
+                ProjectPrefs.SetString(CHANGES_SEARCH_PREFS_KEY, m_ChangesSearchFilter ?? "");
             }
             string lastRefreshTxt = SvnStatusCache.LastRefreshUtc == DateTime.MinValue
                 ? "never"
@@ -1393,13 +1412,13 @@ namespace FRGVersionControl.UI
                 if (grp.isNoChangelist)
                 {
                     var res = ChangelistService.RemovePaths(payload.ToArray());
-                    if (!res.ok) m_StatusBanner = res.reason;
+                    if (!res.ok) ShowErrorBanner(res.reason);
                     else m_StatusBanner = $"Unassigned {payload.Count} file(s) from their changelist.";
                 }
                 else
                 {
                     var res = ChangelistService.AssignPaths(payload.ToArray(), grp.changelistName);
-                    if (!res.ok) m_StatusBanner = res.reason;
+                    if (!res.ok) ShowErrorBanner(res.reason);
                     else m_StatusBanner = $"Assigned {payload.Count} file(s) to '{grp.changelistName}'.";
                 }
                 _ = SvnStatusCache.RefreshAsync();
@@ -1473,7 +1492,7 @@ namespace FRGVersionControl.UI
             var res = ChangelistService.Create(name);
             if (!res.ok)
             {
-                m_StatusBanner = res.reason;
+                ShowErrorBanner(res.reason);
                 return;
             }
             if (!string.IsNullOrEmpty(assignPath))
@@ -1572,7 +1591,7 @@ namespace FRGVersionControl.UI
                         {
                             if (t.IsFaulted)
                             {
-                                m_StatusBanner = $"Rename failed: {t.Exception?.GetBaseException().Message ?? "unknown error"}";
+                                ShowErrorBanner($"Rename failed: {t.Exception?.GetBaseException().Message ?? "unknown error"}");
                                 m_RenamesInFlight.Remove(newName);
                                 Repaint();
                                 return;
@@ -1594,7 +1613,7 @@ namespace FRGVersionControl.UI
                     m_GroupExpandedState[oldName] = was;
                     m_GroupExpandedState.Remove(newName);
                 }
-                m_StatusBanner = v.reason;
+                ShowErrorBanner(v.reason);
                 Repaint();
                 return;
             }
@@ -1941,7 +1960,7 @@ namespace FRGVersionControl.UI
                     if (rest.Length > 0)
                     {
                         var assign = ChangelistService.AssignPaths(rest, m_RenamingGroupName);
-                        if (!assign.ok) m_StatusBanner = assign.reason;
+                        if (!assign.ok) ShowErrorBanner(assign.reason);
                     }
                 }
             });
@@ -1956,7 +1975,7 @@ namespace FRGVersionControl.UI
                     var res = ChangelistService.RemovePaths(paths);
                     if (!res.ok)
                     {
-                        m_StatusBanner = res.reason;
+                        ShowErrorBanner(res.reason);
                     }
                     _ = SvnStatusCache.RefreshAsync();
                 });
@@ -2005,7 +2024,7 @@ namespace FRGVersionControl.UI
             if (entry != null)
             {
                 string startedDisplay = entry.started_at;
-                if (DateTime.TryParse(entry.started_at, out var started))
+                if (DateTime.TryParse(entry.started_at, System.Globalization.CultureInfo.InvariantCulture, System.Globalization.DateTimeStyles.RoundtripKind, out var started))
                 {
                     startedDisplay = started.ToLocalTime().ToString("yyyy-MM-dd HH:mm");
                 }
@@ -2206,10 +2225,19 @@ namespace FRGVersionControl.UI
 
         private void DrawStatusBanner()
         {
+            var notice = FRGVersionControl.Hooks.FileLockAssetPostprocessor.AutoAddNotice;
+            if (!string.IsNullOrEmpty(notice))
+            {
+                EditorGUILayout.BeginHorizontal();
+                EditorGUILayout.HelpBox(notice, MessageType.Warning);
+                if (GUILayout.Button("Dismiss", GUILayout.Width(70), GUILayout.Height(38)))
+                {
+                    FRGVersionControl.Hooks.FileLockAssetPostprocessor.AutoAddNotice = null;
+                }
+                EditorGUILayout.EndHorizontal();
+            }
             if (string.IsNullOrEmpty(m_StatusBanner)) return;
-            EditorGUILayout.HelpBox(m_StatusBanner,
-                m_StatusBanner.StartsWith("Error", StringComparison.OrdinalIgnoreCase)
-                    ? MessageType.Error : MessageType.Info);
+            EditorGUILayout.HelpBox(m_StatusBanner, m_StatusBannerIsError ? MessageType.Error : MessageType.Info);
         }
 
         // ----- Action dispatchers (all async) -----
@@ -2719,20 +2747,12 @@ namespace FRGVersionControl.UI
             string theirs = TryFindSidecarRevisionFile(fullPath, theirsNotMine: true);
             string baseFile = TryFindSidecarRevisionFile(fullPath, theirsNotMine: false);
 
-            string[] candidates = new[]
+            foreach (var exe in FRGVersionControl.Core.DiffToolLocator.Candidates())
             {
-                @"C:\Program Files\TortoiseSVN\bin\TortoiseMerge.exe",
-                @"C:\Program Files\Beyond Compare 4\BCompare.exe",
-                @"C:\Program Files\KDiff3\kdiff3.exe",
-                @"C:\Program Files (x86)\TortoiseSVN\bin\TortoiseMerge.exe"
-            };
-            foreach (var exe in candidates)
-            {
-                if (!File.Exists(exe)) continue;
                 try
                 {
                     string args;
-                    if (exe.EndsWith("TortoiseMerge.exe"))
+                    if (FRGVersionControl.Core.DiffToolLocator.IsTortoiseMerge(exe))
                     {
                         args = $"/base:\"{baseFile ?? mine}\" /theirs:\"{theirs ?? fullPath}\" " +
                                $"/mine:\"{mine ?? fullPath}\" /merged:\"{fullPath}\"";
@@ -2870,7 +2890,7 @@ namespace FRGVersionControl.UI
         /// banner fires for any wc-locked error surfaced through the window.</summary>
         private void SetErrorBanner(string what, string svnError)
         {
-            m_StatusBanner = WrapError(what, svnError);
+            ShowErrorBanner(WrapError(what, svnError));
             RecordSvnErrorForBanner(svnError);
         }
 
@@ -3324,7 +3344,7 @@ namespace FRGVersionControl.UI
             if (!m_ShowStaleLocks)
                 filtered = filtered.Where(l => !l.IsStale());
             if (!string.IsNullOrEmpty(m_LocksSearchFilter))
-                filtered = filtered.Where(l => l.path.ToLower().Contains(m_LocksSearchFilter.ToLower()));
+                filtered = filtered.Where(l => (l.path ?? "").IndexOf(m_LocksSearchFilter, StringComparison.OrdinalIgnoreCase) >= 0);
             return filtered.ToList();
         }
 
@@ -3710,16 +3730,28 @@ namespace FRGVersionControl.UI
         private void DrawCacheStatusBar()
         {
             double now = EditorApplication.timeSinceStartup;
-            if (m_CachedCacheBytes < 0 || (now - m_CacheReadAt) > 5.0)
+            if (!m_PristineMeasuring && (m_CacheReadAt <= 0 || (now - m_CacheReadAt) > 30.0))
             {
-                m_CachedCacheBytes = FileLockMaintenance.MeasurePristineBytes(SvnCommandRunner.ProjectRoot);
-                m_CachedCacheCount = FileLockMaintenance.CountPristineObjects(SvnCommandRunner.ProjectRoot);
+                m_PristineMeasuring = true;
                 m_CacheReadAt = now;
+                var wcRoot = WorkingCopyLayout.WcRoot;
+                System.Threading.Tasks.Task.Run(() =>
+                {
+                    long bytes = FileLockMaintenance.MeasurePristineBytes(wcRoot);
+                    int count = FileLockMaintenance.CountPristineObjects(wcRoot);
+                    SvnCommandRunner.s_UnityMainSync.Post(_ =>
+                    {
+                        m_CachedCacheBytes = bytes;
+                        m_CachedCacheCount = count;
+                        m_PristineMeasuring = false;
+                        if (this != null) Repaint();
+                    }, null);
+                });
             }
 
             EditorGUILayout.BeginHorizontal(EditorStyles.toolbar);
             GUILayout.Label(
-                $".svn/pristine: {FileLockMaintenance.FormatBytes(m_CachedCacheBytes)} " +
+                (m_CachedCacheBytes < 0 ? ".svn/pristine: measuring… " : $".svn/pristine: {FileLockMaintenance.FormatBytes(m_CachedCacheBytes)} ") +
                 $"({m_CachedCacheCount} objects)",
                 EditorStyles.miniLabel);
             GUILayout.FlexibleSpace();
@@ -3733,7 +3765,7 @@ namespace FRGVersionControl.UI
             if (GUILayout.Button("Run Maintenance", EditorStyles.toolbarButton, GUILayout.Width(120)))
             {
                 FileLockMaintenance.RunMaintenanceNow();
-                m_CachedCacheBytes = -1; // force refresh on next repaint
+                m_CacheReadAt = 0;
             }
             EditorGUILayout.EndHorizontal();
         }

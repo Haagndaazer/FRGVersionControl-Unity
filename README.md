@@ -35,7 +35,7 @@ https://github.com/Haagndaazer/FRGVersionControl-Unity.git#0.2.88
 After install, the toolset auto-runs its first-launch setup:
 
 - `Assets/FRGVersionControl/admin-config.json` and `lockable-file-types.json` are scaffolded into your project on first launch. Both are user-editable and SVN-committable.
-- Open **`Window → FRG Version Control`** for the daily-driver window (Changes / Locks tabs, footer with Setup Wizard and Run Maintenance buttons).
+- Open **`FRG Version Control → Version Control Panel`** for the daily-driver window (Changes / Locks tabs, footer with Setup Wizard and Run Maintenance buttons).
 - Right-click any asset → **`Assets → FRG Version Control → ...`** for per-asset actions (Lock, Unlock, Show Log, Edit SVN Properties, Set/Clear Ignore on Commit).
 
 See [Documentation~/USER_GUIDE.md](Documentation~/USER_GUIDE.md) for the full artist guide.

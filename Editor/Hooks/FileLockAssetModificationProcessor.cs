@@ -321,7 +321,7 @@ namespace FRGVersionControl.Hooks
         /// at line ~115 lets the actual save go through).
         ///
         /// Force Unlock (admin/same-email-different-machine) is NOT surfaced here — it remains
-        /// available via Window → FRG Version Control → Locks tab + the Project context menu.
+        /// available via FRG Version Control → Version Control Panel → Locks tab + the Project context menu.
         /// </summary>
         private static List<string> HandleLockedByOtherDialog(List<FileOperationResult> lockedResults, int saveableFileCount)
         {
@@ -356,10 +356,10 @@ namespace FRGVersionControl.Hooks
             {
                 var msg = string.Join("\n", failures.Select(f => $"• {DisplayPath(f.path)} — {f.err}"));
                 Debug.LogError($"[FRGVersionControl] Save-with-ignore-on-commit failed for {failures.Count} file(s). " +
-                               $"Open Window → FRG Version Control → Changes to inspect state.\n{msg}");
+                               $"Open FRG Version Control → Version Control Panel → Changes to inspect state.\n{msg}");
                 EditorUtility.DisplayDialog("Set Ignore on Commit Failed",
                     $"Could not set ignore-on-commit on {failures.Count} file(s). These files were not saved.\n\n{msg}\n\n" +
-                    "Open Window → FRG Version Control → Changes to inspect state.",
+                    "Open FRG Version Control → Version Control Panel → Changes to inspect state.",
                     "OK");
             }
 
@@ -483,7 +483,7 @@ namespace FRGVersionControl.Hooks
                     EditorUtility.DisplayDialog("⚠️ Cannot Move — File In Conflict",
                         $"Cannot rename/move this file:\n\n  {sourcePath}\n\n" +
                         "This file is currently in a conflicted state (post-update merge conflict). " +
-                        "Resolve the conflict first via Window → FRG Version Control → Changes tab " +
+                        "Resolve the conflict first via FRG Version Control → Version Control Panel → Changes tab " +
                         "(Take Mine / Take Theirs on the conflicted row), then retry the move.",
                         "OK");
                     Debug.LogWarning($"[FRGVersionControl] Blocked move of conflicted file: {sourcePath}");

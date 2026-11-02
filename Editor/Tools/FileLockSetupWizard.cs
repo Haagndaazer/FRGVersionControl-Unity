@@ -11,17 +11,22 @@ using FRGVersionControl.Core.Svn;
 namespace FRGVersionControl.Tools
 {
     /// <summary>
-    /// Wizard for initial file-locking setup: a read-only preflight of this workstation.
+    /// Wizard for initial file-locking setup: a preflight of this workstation that also signs the
+    /// project in to SVN.
     ///   1. svn-core finds a usable svn.exe (meta.version).
     ///   2. The project folder is in an SVN working copy — the checkout itself or a folder inside a
     ///      larger checkout such as trunk/ of the whole repository (meta.layout).
-    ///   3. This project's auth cache (.svn-tooling-config) holds an SVN username.
-    ///   4. The server answers for this project's URL with those credentials (auth.bootstrap).
+    ///   3. The project is signed in to SVN (auth.logins). If not, a sign-in panel offers the logins
+    ///      TortoiseSVN saved for the server ("Log in as ...", auth.adoptSavedLogin) and a username /
+    ///      password form (auth.signIn).
+    ///   4. The server answers for this project's URL with that login (auth.bootstrap); a rejected
+    ///      login reopens the sign-in panel.
     ///   5. Optional: TortoiseSVN auto-props set svn:needs-lock on files added outside Unity.
     /// Nothing is changed on the server or in the working copy.
     /// </summary>
     public class FileLockSetupWizard : EditorWindow
     {
+        [MenuItem("FRG Version Control/Setup Wizard", priority = 1)]
         public static void ShowWizard()
         {
             var window = GetWindow<FileLockSetupWizard>("File Locking Setup");
@@ -32,10 +37,17 @@ namespace FRGVersionControl.Tools
         private Vector2 m_ScrollPosition;
         [SerializeField] private string m_StatusMessage = "";
         [SerializeField] private bool m_SetupComplete;
-        [SerializeField] private bool m_NeedsBootstrap;
-        [SerializeField] private string m_BootstrapRepoUrl = "";
         [SerializeField] private bool m_HasAutoRun;
+        [SerializeField] private bool m_ShowSignIn;
+        [SerializeField] private bool m_ShowForm;
+        [SerializeField] private string m_SignInNote = "";
+        [SerializeField] private string m_SignInError = "";
+        [SerializeField] private string m_Username = "";
+        [SerializeField] private string m_CurrentUsername = "";
+        [SerializeField] private SvnLogin.SavedLogin[] m_SavedLogins = new SvnLogin.SavedLogin[0];
+        [NonSerialized] private string m_Password = "";
         private bool m_Running;
+        private bool m_SigningIn;
 
         private void OnEnable()
         {
@@ -43,8 +55,13 @@ namespace FRGVersionControl.Tools
             if (!m_HasAutoRun)
             {
                 m_HasAutoRun = true;
-                EditorApplication.delayCall += () => { RunSetup(); Repaint(); };
+                EditorApplication.delayCall += () => { if (this == null) return; RunSetup(); Repaint(); };
             }
+        }
+
+        private void OnDisable()
+        {
+            m_Password = "";
         }
 
         private void OnGUI()
@@ -54,29 +71,20 @@ namespace FRGVersionControl.Tools
             GUILayout.Label("File Locking System Setup (SVN backend)", EditorStyles.boldLabel);
             GUILayout.Space(10);
 
-            GUILayout.Label("This wizard checks that this workstation is ready for SVN file locking. " +
-                            "It runs when the window opens; click below to run it again after fixing something.",
+            GUILayout.Label("This wizard checks that this workstation is ready for SVN file locking and signs this " +
+                            "project in to SVN. It runs when the window opens; click below to run it again after fixing something.",
                             EditorStyles.wordWrappedLabel);
             GUILayout.Space(5);
 
             GUILayout.Label("1. svn command-line client is installed (TortoiseSVN with command line client tools)", EditorStyles.wordWrappedLabel);
             GUILayout.Label("2. The project folder is in an SVN checkout", EditorStyles.wordWrappedLabel);
-            GUILayout.Label("3. Your SVN username is cached for this project", EditorStyles.wordWrappedLabel);
-            GUILayout.Label("4. The SVN server answers with your cached credentials", EditorStyles.wordWrappedLabel);
+            GUILayout.Label("3. You are signed in to SVN for this project", EditorStyles.wordWrappedLabel);
+            GUILayout.Label("4. The SVN server accepts your login", EditorStyles.wordWrappedLabel);
             GUILayout.Label("5. Optional: TortoiseSVN auto-props for svn:needs-lock", EditorStyles.wordWrappedLabel);
 
             GUILayout.Space(10);
 
-            EditorGUILayout.HelpBox(
-                "First-run note: if step 4 reports an untrusted certificate, accept it once from a terminal " +
-                "in this project folder:\n" +
-                $"  svn info <repo-url> --config-dir \"{SvnCommandRunner.ToolingConfigDir}\"\n" +
-                "choose (p)ermanent when asked to trust the certificate, then run this wizard again.",
-                MessageType.None);
-
-            GUILayout.Space(10);
-
-            using (new EditorGUI.DisabledScope(m_Running))
+            using (new EditorGUI.DisabledScope(m_Running || m_SigningIn))
             {
                 if (GUILayout.Button(new GUIContent("Run Setup Validation",
                                                     "Runs the five checks again. Safe to click anytime."),
@@ -94,64 +102,146 @@ namespace FRGVersionControl.Tools
                                         m_SetupComplete ? MessageType.Info : MessageType.Warning);
             }
 
-            // Inline bootstrap helper for the auth-cache failure case.
-            if (m_NeedsBootstrap)
-            {
-                GUILayout.Space(8);
-                EditorGUILayout.LabelField("Auth cache bootstrap helper", EditorStyles.boldLabel);
-                EditorGUILayout.HelpBox(
-                    "Click below to copy the bootstrap command to your clipboard, then open a terminal in " +
-                    "this project folder and paste it. SVN will prompt for your password and cache it for " +
-                    "this project. Run the wizard again when done.",
-                    MessageType.None);
-                if (GUILayout.Button(new GUIContent("Copy Bootstrap Command to Clipboard",
-                                                    "Copies an `svn info` command pre-filled with the repo URL " +
-                                                    "and this project's config dir. You then paste it into a terminal."),
-                                     GUILayout.Height(24)))
-                {
-                    string cmd = $"svn info {m_BootstrapRepoUrl} " +
-                                 $"--config-dir \"{SvnCommandRunner.ToolingConfigDir}\" " +
-                                 "--username <YOUR_USERNAME> " +
-                                 "--trust-server-cert-failures unknown-ca,cn-mismatch";
-                    EditorGUIUtility.systemCopyBuffer = cmd;
-                    m_StatusMessage += "\n\n[clipboard] Bootstrap command copied. Replace <YOUR_USERNAME> " +
-                                       "with your SVN username, paste in a terminal, run, enter password.";
-                }
-                if (GUILayout.Button(new GUIContent("Open Terminal in Project Folder",
-                                                    "Opens cmd.exe in the project folder. Paste the copied " +
-                                                    "command and run it."),
-                                     GUILayout.Height(24)))
-                {
-                    OpenTerminalInProjectRoot();
-                }
-            }
+            if (m_ShowSignIn) DrawSignIn();
 
             EditorGUILayout.EndScrollView();
         }
 
-        private static void OpenTerminalInProjectRoot()
+        private void DrawSignIn()
         {
+            GUILayout.Space(8);
+            EditorGUILayout.LabelField("Sign in to SVN", EditorStyles.boldLabel);
+            if (!string.IsNullOrEmpty(m_SignInNote)) EditorGUILayout.HelpBox(m_SignInNote, MessageType.Info);
+
+            using (new EditorGUI.DisabledScope(m_Running || m_SigningIn))
+            {
+                var saved = m_SavedLogins ?? new SvnLogin.SavedLogin[0];
+                foreach (var login in saved)
+                {
+                    var server = SvnLogin.ServerName(login.realm);
+                    if (GUILayout.Button(new GUIContent($"Log in as {login.username}",
+                                                        $"Uses the login TortoiseSVN saved for {server}. Your password is not shown or typed."),
+                                         GUILayout.Height(28)))
+                    {
+                        var chosen = login;
+                        EditorApplication.delayCall += () => Adopt(chosen);
+                    }
+                    EditorGUILayout.LabelField($"Saved by TortoiseSVN for {server}", EditorStyles.centeredGreyMiniLabel);
+                }
+
+                if (saved.Length > 0 && !m_ShowForm)
+                {
+                    GUILayout.Space(4);
+                    if (GUILayout.Button("Use a different account", GUILayout.Height(22))) m_ShowForm = true;
+                }
+
+                if (m_ShowForm || saved.Length == 0)
+                {
+                    GUILayout.Space(6);
+                    m_Username = EditorGUILayout.TextField("Username", m_Username);
+                    m_Password = EditorGUILayout.PasswordField("Password", m_Password);
+                    EditorGUILayout.LabelField("Use the same username and password as in TortoiseSVN. The password is saved " +
+                                               "encrypted for this project only.", EditorStyles.wordWrappedMiniLabel);
+                    using (new EditorGUI.DisabledScope(string.IsNullOrWhiteSpace(m_Username) || string.IsNullOrEmpty(m_Password)))
+                    {
+                        if (GUILayout.Button("Sign In", GUILayout.Height(26))) EditorApplication.delayCall += SignIn;
+                    }
+                }
+            }
+
+            if (m_SigningIn) EditorGUILayout.HelpBox("Checking your login with the SVN server...", MessageType.None);
+            if (!string.IsNullOrEmpty(m_SignInError)) EditorGUILayout.HelpBox(m_SignInError, MessageType.Warning);
+        }
+
+        private void OfferSignIn(SvnLogin.Status status, string note, string prefillUsername)
+        {
+            m_ShowSignIn = true;
+            m_SignInNote = note;
+            m_SignInError = "";
+            m_SavedLogins = status.savedLogins ?? new SvnLogin.SavedLogin[0];
+            m_ShowForm = m_SavedLogins.Length == 0;
+            if (!string.IsNullOrEmpty(prefillUsername)) m_Username = prefillUsername;
+            else if (string.IsNullOrEmpty(m_Username) && m_SavedLogins.Length > 0) m_Username = m_SavedLogins[0].username;
+        }
+
+        private async void Adopt(SvnLogin.SavedLogin login)
+        {
+            if (this == null || m_SigningIn || !ConfirmAccountChange(login.username)) return;
+            m_SigningIn = true;
+            m_SignInError = "";
+            Repaint();
             try
             {
-                var psi = new System.Diagnostics.ProcessStartInfo
+                var outcome = await SvnLogin.AdoptAsync(login.id).ConfigureAwait(true);
+                if (outcome.signedIn)
                 {
-                    FileName = "cmd.exe",
-                    WorkingDirectory = SvnCommandRunner.ProjectRoot,
-                    UseShellExecute = true
-                };
-                System.Diagnostics.Process.Start(psi);
+                    OnSignedIn();
+                    return;
+                }
+                m_ShowForm = true;
+                m_Username = login.username;
+                m_SignInError = SetupWizardText.SignInFailure(outcome.kind, outcome.message, outcome.defaultAction);
             }
-            catch (Exception ex)
+            finally
             {
-                Debug.LogWarning($"[FRGVersionControl.SetupWizard] Could not open terminal: {ex.Message}. " +
-                                 $"Open a terminal manually at: {SvnCommandRunner.ProjectRoot}");
+                m_SigningIn = false;
+                if (this != null) Repaint();
             }
+        }
+
+        private async void SignIn()
+        {
+            if (this == null || m_SigningIn) return;
+            var username = (m_Username ?? "").Trim();
+            if (string.IsNullOrEmpty(username) || string.IsNullOrEmpty(m_Password) || !ConfirmAccountChange(username)) return;
+            var password = m_Password;
+            m_Password = "";
+            GUI.FocusControl(null);
+            m_SigningIn = true;
+            m_SignInError = "";
+            Repaint();
+            try
+            {
+                var outcome = await SvnLogin.SignInAsync(username, password).ConfigureAwait(true);
+                password = null;
+                if (outcome.signedIn)
+                {
+                    OnSignedIn();
+                    return;
+                }
+                m_SignInError = SetupWizardText.SignInFailure(outcome.kind, outcome.message, outcome.defaultAction);
+            }
+            finally
+            {
+                password = null;
+                m_SigningIn = false;
+                if (this != null) Repaint();
+            }
+        }
+
+        private bool ConfirmAccountChange(string newUsername)
+        {
+            if (string.IsNullOrEmpty(m_CurrentUsername) || string.Equals(m_CurrentUsername, newUsername, StringComparison.Ordinal)) return true;
+            return EditorUtility.DisplayDialog("Switch SVN account?",
+                $"This project is signed in as {m_CurrentUsername}. Signing in as {newUsername} makes Unity work as {newUsername}; " +
+                $"files locked by {m_CurrentUsername} stay locked by {m_CurrentUsername}.",
+                "Switch account", "Cancel");
+        }
+
+        private void OnSignedIn()
+        {
+            m_ShowSignIn = false;
+            m_ShowForm = false;
+            m_SignInError = "";
+            m_Password = "";
+            FileLockManager.Instance.ReloadIdentity();
+            if (this != null) RunSetup();
         }
 
         private void Append(string text)
         {
             m_StatusMessage += text;
-            Repaint();
+            if (this != null) Repaint();
         }
 
         private async void RunSetup()
@@ -169,7 +259,7 @@ namespace FRGVersionControl.Tools
             finally
             {
                 m_Running = false;
-                Repaint();
+                if (this != null) Repaint();
             }
         }
 
@@ -177,8 +267,8 @@ namespace FRGVersionControl.Tools
         {
             m_StatusMessage = "Running setup...\n";
             m_SetupComplete = false;
-            m_NeedsBootstrap = false;
-            m_BootstrapRepoUrl = "";
+            m_ShowSignIn = false;
+            m_SignInError = "";
             var client = FileLockManager.Instance.IpcClient;
             if (!client.IsAvailable)
             {
@@ -212,39 +302,35 @@ namespace FRGVersionControl.Tools
             }
             foreach (var line in SetupWizardText.LayoutLines(layout.info)) Append("\n" + line);
 
-            // Step 3: SVN identity from this project's auth cache.
-            Append("\n\n3. Checking the cached SVN username for this project...");
-            string cachedUsername = null;
-            try
+            // Step 3: this project's SVN login.
+            Append("\n\n3. Checking your SVN login for this project...");
+            var login = await SvnLogin.FetchStatusAsync().ConfigureAwait(true);
+            if (login.status == null)
             {
-                cachedUsername = SvnAuthCacheReader.GetUsernameForRepoUrl(layout.info.projectUrl);
+                Append(login.busy ? "\n[WAIT] SVN is busy right now. Run the wizard again in a moment." : "\n[FAIL] " + login.error);
+                return;
             }
-            catch (Exception ex)
+            var status = login.status;
+            if (!status.usesPasswordCache)
             {
-                Append($"\n[WARN] Reading the auth cache failed: {ex.Message}");
+                m_CurrentUsername = "";
+                Append("\n[NOTE] This repository's URL does not use SVN passwords" +
+                       (string.IsNullOrEmpty(status.localUsername) ? "." : $", so svn records your Windows user name ({status.localUsername})."));
             }
-            if (string.IsNullOrEmpty(cachedUsername))
+            else if (status.ProjectUsername != null)
             {
-                if (!SvnAuthCacheReader.UsesPasswordCache(layout.info.projectUrl))
-                {
-                    Append("\n[NOTE] This repository's URL scheme does not keep passwords in the SVN auth cache, " +
-                           "so no username can be read from it.");
-                }
-                else
-                {
-                    m_BootstrapRepoUrl = layout.info.projectUrl;
-                    m_NeedsBootstrap = true;
-                    Append("\n[FAIL] No SVN username is cached for this project. Use the bootstrap helper below, " +
-                           "then run the wizard again.");
-                    return;
-                }
+                m_CurrentUsername = status.ProjectUsername;
+                Append($"\n[OK] Signed in as {status.ProjectUsername}");
             }
             else
             {
-                Append($"\n[OK] SVN username: {cachedUsername}");
+                m_CurrentUsername = "";
+                OfferSignIn(status, SetupWizardText.SignInNote(status.savedLogins?.Length ?? 0), null);
+                Append("\n[ACTION] You are not signed in to SVN for this project yet. Sign in below; the wizard continues by itself.");
+                return;
             }
 
-            // Step 4: the server answers for this project's URL with the cached credentials.
+            // Step 4: the server answers for this project's URL with that login.
             Append("\n\n4. Contacting the SVN server...");
             var probe = await client.InvokeRawAsync("auth.bootstrap", "{}", client.BuildDefaultContext()).ConfigureAwait(true);
             if (!probe.Ok)
@@ -256,9 +342,17 @@ namespace FRGVersionControl.Tools
             }
             if (IpcJson.ReadScalar(probe.RawLine, "reachable", inResult: true) != "true")
             {
+                var kind = IpcJson.ReadScalar(probe.RawLine, "kind", inResult: true);
+                if (kind == "auth_failed" && status.usesPasswordCache)
+                {
+                    OfferSignIn(status, "The SVN server did not accept the login saved for this project (the password may have changed). Sign in again. If your login is right, ask your SVN admin for access to this repository.",
+                                status.ProjectUsername);
+                    Append("\n[ACTION] The SVN server did not accept your saved login. Sign in again below.");
+                    return;
+                }
                 var message = IpcJson.ReadScalar(probe.RawLine, "message", inResult: true);
                 var action = IpcJson.ReadScalar(probe.RawLine, "defaultAction", inResult: true);
-                Append($"\n[FAIL] The SVN server did not accept the request: {FirstLine(message)}\n   {action}");
+                Append($"\n[FAIL] The SVN server did not accept the request: {SetupWizardText.LastLine(message)}\n   {action}");
                 return;
             }
             var wcRevision = await client.InvokeRawAsync("meta.info", "{}", client.BuildDefaultContext()).ConfigureAwait(true);
@@ -287,24 +381,41 @@ namespace FRGVersionControl.Tools
                                "changelist on top of clearing the read-only flag; svn:needs-lock " +
                                "server-side enforcement prevents accidental commits.";
             m_SetupComplete = true;
-            Repaint();
-        }
-
-        private static string FirstLine(string text)
-        {
-            if (string.IsNullOrEmpty(text)) return "";
-            foreach (var raw in text.Split('\n'))
-            {
-                var line = raw.Trim();
-                if (line.Length > 0) return line;
-            }
-            return "";
+            if (this != null) Repaint();
         }
     }
 
     /// <summary>Pure text helpers for the Setup Wizard (unit-tested).</summary>
     public static class SetupWizardText
     {
+        public static string SignInNote(int savedLoginCount) => savedLoginCount > 0
+            ? "TortoiseSVN already has a login saved for this server. If the name below is yours, click it; otherwise use a different account."
+            : "Sign in with the username and password you use in TortoiseSVN.";
+
+        /// <summary>The sentence shown when a sign-in fails: a rejected login gets only its action
+        /// sentence (svn's own text starts with a misleading "Unable to connect"); anything else gets
+        /// svn's most specific line, then the action.</summary>
+        public static string SignInFailure(string kind, string message, string action)
+        {
+            if (kind == "auth_failed" && !string.IsNullOrEmpty(action)) return action;
+            var detail = LastLine(message);
+            if (string.IsNullOrEmpty(detail)) return action ?? "";
+            return string.IsNullOrEmpty(action) ? detail : detail + "\n" + action;
+        }
+
+        /// <summary>The last non-empty line: svn prints the most specific cause last.</summary>
+        public static string LastLine(string text)
+        {
+            if (string.IsNullOrEmpty(text)) return "";
+            var lines = text.Split('\n');
+            for (int i = lines.Length - 1; i >= 0; i--)
+            {
+                var line = lines[i].Trim();
+                if (line.Length > 0) return line;
+            }
+            return "";
+        }
+
         /// <summary>Step 2's lines for a working-copy layout. A checkout of the whole repository is
         /// a supported layout: it gets one informational note about disk space, never a warning.</summary>
         public static List<string> LayoutLines(WorkingCopyLayout.Info info)

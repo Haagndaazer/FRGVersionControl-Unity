@@ -21,10 +21,10 @@ namespace FRGVersionControl.Core
     /// `svn status -u --xml`) via <see cref="SvnCommandRunner"/>. The previous
     /// Git LFS path is retired.
     ///
-    /// Identity (currentSvnUsername) is read from admin-config.json — Setup Wizard
-    /// (Step G) populates it. If missing, Initialize() refuses to operate (fail-loud)
-    /// because silent fallback to Environment.UserName would mismatch the SVN-stamped
-    /// lock owner and break ownership checks invisibly.
+    /// Identity is the username of this project's saved SVN login, read through svn-core
+    /// (auth.logins); the Setup Wizard signs in. If there is none, Initialize() refuses to
+    /// operate (fail-loud) because a guessed name would mismatch the SVN-stamped lock owner
+    /// and break ownership checks invisibly.
     ///
     /// Public API is preserved for back-compat with UI/Hooks/Services callers.
     /// </summary>
@@ -61,8 +61,8 @@ namespace FRGVersionControl.Core
         public string MachineName => m_MachineName;
 
         // Phase 2 Step D: SVN reports lock owner as the authenticated username
-        // (svn auth `--username admin` → owner stamp "admin"). m_UserName is populated
-        // from admin-config.json `currentSvnUsername`. Comparison against this identifier
+        // (svn auth `--username admin` → owner stamp "admin"). m_UserName is the project's
+        // saved SVN login (auth.logins). Comparison against this identifier
         // is case-insensitive (FileLocks.IsLockedByUser) since SVN preserves the case
         // the user authenticated with.
         private string LockOwnerIdentifier => m_UserName;
@@ -124,52 +124,43 @@ namespace FRGVersionControl.Core
 
             // Load admin config — display name + email come from there (used for
             // history records). SVN username is NOT stored in any committed file
-            // (Phase 3 decision); it's read at runtime from SVN's auth cache via
-            // SvnAuthCacheReader.
+            // (Phase 3 decision); svn-core reads it from this project's saved login.
             LoadAdminConfig();
 
-            // Identity bootstrap: derive SVN username from SVN's own auth cache. Each
-            // Unity instance uses a per-WC config dir (SvnCommandRunner.ToolingConfigDir)
-            // so two Unity instances on the same machine each have their own cache.
-            string cachedUsername = null;
-            try
+            var login = FRGVersionControl.Core.Svn.SvnLogin.FetchStatus();
+            if (login.status == null)
             {
-                cachedUsername = FRGVersionControl.Core.Svn.SvnAuthCacheReader.GetUsernameForCurrentRepo();
-            }
-            catch (Exception cacheEx)
-            {
-                Debug.LogWarning($"[FRGVersionControl] Auth cache read failed: {cacheEx.Message}");
+                if (!m_IdentityErrorLogged)
+                {
+                    m_IdentityErrorLogged = true;
+                    Debug.LogWarning($"[FRGVersionControl] Could not read this project's SVN login yet: {login.error} " +
+                                     "File locking starts automatically once it can be read.");
+                }
+                ScheduleIdentityRetry();
+                m_Initialized = false;
+                return;
             }
 
-            if (!string.IsNullOrEmpty(cachedUsername))
+            var loginName = login.status.ProjectUsername
+                            ?? (login.status.usesPasswordCache ? null : login.status.localUsername);
+            if (!string.IsNullOrEmpty(loginName))
             {
-                m_UserName = cachedUsername;
+                m_UserName = loginName;
             }
             else if (!string.IsNullOrEmpty(m_UserName))
             {
-                // Back-compat: admin-config.json's deprecated currentSvnUsername field is
-                // still respected if present, with a warning. Remove the field once your
-                // WC has been bootstrapped (svn info --config-dir <ProjectRoot>/.svn-tooling-config).
                 Debug.LogWarning(
                     "[FRGVersionControl] Using deprecated currentSvnUsername from admin-config.json " +
-                    $"('{m_UserName}'). Remove this field after bootstrapping the per-WC SVN " +
-                    "auth cache by running once from a terminal:\n" +
-                    $"  svn info <repo-url> --config-dir \"{FRGVersionControl.Core.Svn.SvnCommandRunner.ToolingConfigDir}\" " +
-                    "--username <you> --trust-server-cert-failures unknown-ca,cn-mismatch");
+                    $"('{m_UserName}'). Sign in with the Setup Wizard (FRG Version Control → Setup Wizard), " +
+                    "then remove that field.");
             }
 
-            // FAIL LOUD if no username could be derived from either source.
             if (string.IsNullOrEmpty(m_UserName))
             {
                 Debug.LogError(
-                    "[FRGVersionControl] No SVN username found. Bootstrap the per-WC auth cache by " +
-                    "running once from a terminal in the project root:\n" +
-                    $"  svn info <repo-url> --config-dir \"{FRGVersionControl.Core.Svn.SvnCommandRunner.ToolingConfigDir}\" " +
-                    "--username <you> --trust-server-cert-failures unknown-ca,cn-mismatch\n" +
-                    "Then re-open Unity. SVN will prompt for password and cache it locally.");
+                    "[FRGVersionControl] Not signed in to SVN for this project. " +
+                    "Open FRG Version Control → Setup Wizard and sign in.");
 
-                // Show a one-shot modal dialog the first time this happens per session,
-                // surfacing the Setup Wizard so artists don't have to dig through Console.
                 const string SessionShownKey = "FRGVersionControl.SetupDialogShownThisSession";
                 if (!SessionState.GetBool(SessionShownKey, false))
                 {
@@ -177,10 +168,10 @@ namespace FRGVersionControl.Core
                     EditorApplication.delayCall += () =>
                     {
                         bool openWizard = EditorUtility.DisplayDialog(
-                            "FRG Version Control: SVN Setup Required",
-                            "FRG Version Control needs your SVN credentials cached locally before it can manage locks.\n\n" +
-                            "Click \"Open Setup Wizard\" to walk through the bootstrap (it copies the command to your clipboard and opens a terminal in this project root for you).\n\n" +
-                            "Until that's done, lock/unlock/commit/update from Unity will not work.",
+                            "FRG Version Control: Sign in to SVN",
+                            "FRG Version Control needs you to sign in to SVN for this project before it can manage locks.\n\n" +
+                            "Click \"Open Setup Wizard\" to sign in. If TortoiseSVN already knows your login, it is one click.\n\n" +
+                            "Until then, lock/unlock/commit/update from Unity will not work.",
                             "Open Setup Wizard",
                             "Later");
                         if (openWizard)
@@ -206,6 +197,57 @@ namespace FRGVersionControl.Core
             // Initial cache populate (best-effort; failures are non-fatal here —
             // background sync will retry every 5 min)
             try { RefreshLockCache(); } catch { /* ignore at init */ }
+        }
+
+        private bool m_IdentityErrorLogged;
+        private int m_IdentityRetries;
+        private double m_NextIdentityRetryAt;
+        private const int MaxIdentityRetries = 6;
+        private const double IdentityRetrySeconds = 10.0;
+
+        private void ScheduleIdentityRetry()
+        {
+            if (m_IdentityRetries >= MaxIdentityRetries) return;
+            m_IdentityRetries++;
+            SvnCommandRunner.s_UnityMainSync.Post(_ =>
+            {
+                m_NextIdentityRetryAt = EditorApplication.timeSinceStartup + IdentityRetrySeconds;
+                EditorApplication.update -= RetryIdentity;
+                EditorApplication.update += RetryIdentity;
+            }, null);
+        }
+
+        private void RetryIdentity()
+        {
+            if (EditorApplication.timeSinceStartup < m_NextIdentityRetryAt) return;
+            EditorApplication.update -= RetryIdentity;
+            if (!m_Initialized) Initialize();
+        }
+
+        /// <summary>Re-reads this project's SVN login after the Setup Wizard signs in: starts file
+        /// locking if it was waiting for a login, otherwise picks up a changed username and refreshes
+        /// the lock cache so "locked by me" follows the new account.</summary>
+        public bool ReloadIdentity()
+        {
+            if (!m_Initialized)
+            {
+                m_IdentityErrorLogged = false;
+                m_IdentityRetries = 0;
+                Initialize();
+                return m_Initialized;
+            }
+            var login = SvnLogin.FetchStatus();
+            if (login.status == null) return false;
+            var name = login.status.ProjectUsername
+                       ?? (login.status.usesPasswordCache ? null : login.status.localUsername);
+            if (string.IsNullOrEmpty(name)) return false;
+            if (!string.Equals(name, m_UserName, StringComparison.Ordinal))
+            {
+                m_UserName = name;
+                Debug.Log($"[FRGVersionControl] Signed in to SVN as {m_UserName}.");
+            }
+            try { RefreshLockCache(); } catch { }
+            return true;
         }
 
         /// <summary>

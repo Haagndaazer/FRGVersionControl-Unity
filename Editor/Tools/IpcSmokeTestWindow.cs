@@ -213,6 +213,8 @@ namespace FRGVersionControl.Tools
 
             yield return new Probe { Op = "meta.layout", Args = "{}", Expectation = Expect.Ok,
                 LabelOnPass = "project folder located in its working copy (local)" };
+            yield return new Probe { Op = "auth.logins", Args = "{}", Expectation = Expect.Ok,
+                LabelOnPass = "project and TortoiseSVN logins listed (local, no passwords)" };
 
             // -- Server-dependent op (info verdict when the server is offline) --
             yield return new Probe { Op = "auth.bootstrap (server)", InvokeAs = "auth.bootstrap",

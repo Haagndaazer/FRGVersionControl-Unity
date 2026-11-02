@@ -87,7 +87,7 @@ namespace FRGVersionControl.Core.OverrideMode
             {
                 error = $"svn commit failed: {commit.error ?? commit.output}\n" +
                         "The lock was acquired but the commit failed. Resolve the issue and retry " +
-                        "via Window/FRG Version Control/Locks tab.";
+                        "via FRG Version Control → Version Control Panel → Locks tab.";
                 Debug.LogError($"[FRGVersionControl.IgnoreOnCommit] Convert: commit failed (lock retained): {error}");
                 return false;
             }

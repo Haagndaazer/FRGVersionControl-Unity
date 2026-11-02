@@ -55,7 +55,7 @@ namespace FRGVersionControl.Services
             "// SVN merge conflict in this file. The original conflict markers were replaced\n" +
             "// with this stub so Unity can compile the rest of the project while you resolve.\n" +
             "//\n" +
-            "// Resolve via:  Window / FRG Version Control / Changes tab\n" +
+            "// Resolve via:  FRG Version Control / Version Control Panel / Changes tab\n" +
             "//   (Take Mine / Take Theirs / Open externally on the conflicted row)\n" +
             "//\n" +
             "// The full original content (with <<<<<<< ======= >>>>>>> markers) and the\n" +
@@ -363,7 +363,7 @@ namespace FRGVersionControl.Services
                 File.WriteAllText(fullPath, body);
                 Debug.Log(
                     $"[FRGVersionControl] Stubbed conflicted code file: {assetPath}\n" +
-                    "Unity can now compile. Resolve via Window / FRG Version Control / Changes tab " +
+                    "Unity can now compile. Resolve via FRG Version Control / Version Control Panel / Changes tab " +
                     "(Take Mine / Take Theirs on the conflicted row).");
                 return true;
             }

@@ -36,7 +36,7 @@ namespace FRGVersionControl.Hooks
                     // entries on editor startup. For Stage 3 we just log loudly; Stage 4/5 will
                     // wire a non-modal banner via the FileLockWindow tab.
                     Debug.LogWarning($"[FRGVersionControl] You have {active} active ignore-on-commit file(s). " +
-                                     "Open Window → FRG Version Control → Changes tab to view.");
+                                     "Open FRG Version Control → Version Control Panel → Changes tab to view.");
                 }
             }
         }

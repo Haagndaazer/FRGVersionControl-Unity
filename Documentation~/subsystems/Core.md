@@ -51,19 +51,9 @@ Low-level SVN command execution wrapper.
 - `Cleanup(workingCopyRoot)` / `VacuumPristines(workingCopyRoot, timeoutSeconds)`
 - `HashSha256(path)` - Working-tree content hash for override clobber detection
 
-### Svn/SvnAuthCacheReader.cs
+### Svn/SvnLogin.cs
 
-Reads SVN's on-disk auth cache to derive the current SVN username for the repo, without storing identity strings in any committed file.
-
-**Format:** `<config-dir>/auth/svn.simple/<hash>` files in SVN's K/V record format. `username`, `passtype`, `svn:realmstring` are plain text; `password` may be wincrypt-encrypted on Windows but isn't needed here.
-
-**Realm matching:** server-scoped (e.g., `<https://localhost:443> VisualSVN Server`), not repo-scoped. Match by host:port substring, not full equality.
-
-**Bootstrap (once per WC, from a real terminal):**
-```
-svn info <repo-url> --config-dir <ProjectRoot>/.svn-tooling-config \
-    --username <user> --trust-server-cert-failures unknown-ca,cn-mismatch
-```
+This project's SVN login, entirely through svn-core (SVN_CORE_API.md §5.11); the editor never reads svn's auth files. `FetchStatus` (`auth.logins`) returns the project's own saved login (its username is the lock-owner identity `FileLockManager` uses) and the logins TortoiseSVN saved for the same server. `AdoptAsync` (`auth.adoptSavedLogin`) reuses one of those after svn-core checks it with the server; `SignInAsync` (`auth.signIn`) signs in with a typed username and password, which svn-core hands to svn on stdin only. The Setup Wizard drives all three; `FileLockManager.ReloadIdentity()` picks up a new login without restarting the editor.
 
 ### FileLockData.cs
 

@@ -14,7 +14,7 @@ namespace FRGVersionControl.Tests
         {
             "meta.version", "meta.info", "status.query", "status.allEntries", "status.isVersioned",
             "hist.log", "hist.exportRevision", "hist.hashSha256", "hist.list", "cl.membership",
-            "cl.userListGet", "override.list", "shelf.list", "shelf.diff", "prop.list", "conflict.list", "ipc.cancel",
+            "cl.userListGet", "override.list", "shelf.list", "shelf.diff", "prop.list", "conflict.list", "auth.logins", "ipc.cancel",
         };
 
         private static readonly string[] LongExclusiveOps =
@@ -27,7 +27,7 @@ namespace FRGVersionControl.Tests
             "lock.acquire", "lock.release", "lock.releaseByUrl", "mutate.add", "mutate.addForCommit", "mutate.revert",
             "mutate.move", "mutate.delete", "mutate.reconcileMissing", "mutate.prepareDelete", "cl.add", "cl.remove",
             "cl.move", "cl.userListSet", "cl.userListAdd", "cl.userListRemove", "cl.userListRename", "conflict.resolve",
-            "hist.record", "hist.clear", "auth.bootstrap", "override.begin", "override.end", "override.reconcile",
+            "hist.record", "hist.clear", "auth.bootstrap", "auth.adoptSavedLogin", "auth.signIn", "override.begin", "override.end", "override.reconcile",
             "shelf.delete", "prop.set", "prop.delete",
         };
 

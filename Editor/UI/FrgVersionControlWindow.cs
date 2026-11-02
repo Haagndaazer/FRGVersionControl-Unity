@@ -36,7 +36,7 @@ namespace FRGVersionControl.UI
     public class FrgVersionControlWindow : EditorWindow
     {
         // ----- Static menu hook -----
-        [MenuItem("Window/FRG Version Control")]
+        [MenuItem("FRG Version Control/Version Control Panel", priority = 0)]
         public static void Open()
         {
             var w = GetWindow<FrgVersionControlWindow>("FRG Version Control");

@@ -39,7 +39,7 @@ namespace FRGVersionControl.UI
         private static readonly GUIContent s_SidecarTooltip = new GUIContent(
             string.Empty,
             "SVN conflict sidecar (transient). Resolve the conflict via " +
-            "Window → FRG Version Control → Changes tab to remove.");
+            "FRG Version Control → Version Control Panel → Changes tab to remove.");
 
         // Global cache for git status - event-driven, no expiration timer
         private static System.Collections.Generic.Dictionary<string, SvnFileStatus> s_GlobalSvnStatusCache;
@@ -223,7 +223,7 @@ namespace FRGVersionControl.UI
             GUI.color = new Color(1f, 0.8f, 0.2f, 1f); // amber
             GUI.Label(iconRect, new GUIContent(s_OverrideIcon,
                 "Ignore-on-commit active — your edits are excluded from commits. " +
-                "Use Window → FRG Version Control → Changes tab to clear."));
+                "Use FRG Version Control → Version Control Panel → Changes tab to clear."));
             GUI.color = Color.white;
         }
 
@@ -439,7 +439,7 @@ namespace FRGVersionControl.UI
                 // "error" — distinct from the red `!` we use for real conflicts.
                 icon = s_ConflictIcon;
                 iconColor = new Color(1f, 0.85f, 0.2f, 1f); // Yellow
-                tooltip = "Missing — file gone from disk but still tracked. Open Window → FRG Version Control → Changes tab to resolve.";
+                tooltip = "Missing — file gone from disk but still tracked. Open FRG Version Control → Version Control Panel → Changes tab to resolve.";
             }
             else if (effective == SvnFileStatus.Conflict)
             {
@@ -448,7 +448,7 @@ namespace FRGVersionControl.UI
                 // miss in a Project window full of files. No tint needed; icon is already red.
                 icon = s_ConflictIcon;
                 iconColor = Color.white;
-                tooltip = "Merge conflict — open Window → FRG Version Control → Changes tab";
+                tooltip = "Merge conflict — open FRG Version Control → Version Control Panel → Changes tab";
             }
 
             // Compose a meta-aware tooltip suffix so hovering this glyph alone tells the user

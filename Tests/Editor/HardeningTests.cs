@@ -1,6 +1,7 @@
 using System;
 using System.IO;
 using NUnit.Framework;
+using UnityEngine;
 using FRGVersionControl.Core;
 using FRGVersionControl.Core.IpcClient;
 using FRGVersionControl.Core.Svn;
@@ -112,13 +113,69 @@ namespace FRGVersionControl.Tests
         }
 
         [Test]
-        public void AuthRealmHostPort_UsesTheSchemesDefaultPort()
+        public void SignInText_ServerNameAndFailureSentences()
         {
-            Assert.AreEqual("<https://svn.example:443>", SvnAuthCacheReader.ExtractHostPort("https://svn.example/svn/visa"));
-            Assert.AreEqual("<svn://svn.example:3690>", SvnAuthCacheReader.ExtractHostPort("svn://svn.example/visa"));
-            Assert.AreEqual("<https://svn.example:8443>", SvnAuthCacheReader.ExtractHostPort("https://svn.example:8443/svn/visa"));
-            Assert.IsTrue(SvnAuthCacheReader.UsesPasswordCache("https://svn.example/svn/visa"));
-            Assert.IsFalse(SvnAuthCacheReader.UsesPasswordCache("file:///C:/repo"));
+            Assert.AreEqual("svn.frgdev.net", SvnLogin.ServerName("<https://svn.frgdev.net:443> FRG SVN Repository"));
+            Assert.AreEqual("", SvnLogin.ServerName(null));
+            Assert.AreEqual("Check them, then sign in again.",
+                SetupWizardText.SignInFailure("auth_failed", "svn: E170013: Unable to connect\nsvn: E215004: No more credentials", "Check them, then sign in again."));
+            Assert.AreEqual("svn: E730061: No connection could be made\nCheck the server.",
+                SetupWizardText.SignInFailure("unreachable", "svn: E170013: Unable to connect\nsvn: E730061: No connection could be made\n", "Check the server."));
+            Assert.AreEqual("Try again.", SetupWizardText.SignInFailure("timeout", null, "Try again."));
+            StringAssert.Contains("TortoiseSVN already has a login", SetupWizardText.SignInNote(1));
+            StringAssert.Contains("username and password you use in TortoiseSVN", SetupWizardText.SignInNote(0));
+        }
+
+        [Test]
+        public void SignIn_RequestJson_EscapesQuotesBackslashesAndNonAscii()
+        {
+            var password = "p\"a\\s" + (char)0x00E9 + "s'";
+            var json = "{\"password\":\"" + SvnCommandRunner.IpcEscape(password) + "\"}";
+            var parsed = JsonUtility.FromJson<PasswordProbe>(json);
+            Assert.AreEqual(password, parsed.password);
+        }
+
+        [Serializable]
+        private sealed class PasswordProbe { public string password; }
+
+        [Test]
+        public void SignIn_ParsesTheCoresAnswers()
+        {
+            var u = ((char)92).ToString() + "u";
+            var notSignedIn = SvnLogin.ParseStatus(
+                "{\"v\":1,\"id\":\"p\",\"ok\":true,\"result\":{\"url\":\"https://svn.frgdev.net/svn/visasoccer/trunk\",\"usesPasswordCache\":true," +
+                "\"savedLogins\":[{\"id\":\"1922a9da526e6ad7967fefacd1326bd0\",\"username\":\"mateo@freerangegames.com\"," +
+                "\"realm\":\"" + u + "003Chttps://svn.frgdev.net:443" + u + "003E FRG SVN Repository\"}]}}");
+            Assert.IsTrue(notSignedIn.usesPasswordCache);
+            Assert.IsNull(notSignedIn.ProjectUsername, "an omitted projectLogin means not signed in");
+            Assert.AreEqual(1, notSignedIn.savedLogins.Length);
+            Assert.AreEqual("mateo@freerangegames.com", notSignedIn.savedLogins[0].username);
+            Assert.AreEqual("svn.frgdev.net", SvnLogin.ServerName(notSignedIn.savedLogins[0].realm));
+
+            var signedIn = SvnLogin.ParseStatus(
+                "{\"v\":1,\"id\":\"p\",\"ok\":true,\"result\":{\"url\":\"https://svn.example/svn/x\",\"usesPasswordCache\":true," +
+                "\"projectLogin\":{\"username\":\"ann\",\"realm\":\"x\"},\"savedLogins\":[]}}");
+            Assert.AreEqual("ann", signedIn.ProjectUsername);
+
+            var local = SvnLogin.ParseStatus(
+                "{\"v\":1,\"id\":\"p\",\"ok\":true,\"result\":{\"url\":\"file:///C:/repo\",\"usesPasswordCache\":false,\"localUsername\":\"colto\",\"savedLogins\":[]}}");
+            Assert.IsFalse(local.usesPasswordCache);
+            Assert.AreEqual("colto", local.localUsername);
+            Assert.IsNull(local.ProjectUsername);
+
+            var rejected = SvnLogin.ParseOutcome(
+                "{\"v\":1,\"id\":\"p\",\"ok\":true,\"result\":{\"signedIn\":false,\"username\":\"ann\",\"url\":\"https://svn.example/svn/x\"," +
+                "\"kind\":\"auth_failed\",\"svnCode\":\"E170001\",\"message\":\"svn: E170013: Unable to connect\\nsvn: E170001: Password incorrect\"," +
+                "\"defaultAction\":\"The server did not accept that username and password. Check them, then sign in again.\"}}");
+            Assert.IsFalse(rejected.signedIn);
+            Assert.AreEqual("auth_failed", rejected.kind);
+            Assert.AreEqual("The server did not accept that username and password. Check them, then sign in again.",
+                SetupWizardText.SignInFailure(rejected.kind, rejected.message, rejected.defaultAction));
+
+            var ok = SvnLogin.ParseOutcome(
+                "{\"v\":1,\"id\":\"p\",\"ok\":true,\"result\":{\"signedIn\":true,\"username\":\"ann\",\"url\":\"https://svn.example/svn/x\"}}");
+            Assert.IsTrue(ok.signedIn);
+            Assert.AreEqual("ann", ok.username);
         }
 
         [Test]

@@ -56,6 +56,7 @@ namespace FRGVersionControl.Core.IpcClient
             "shelf.list", "shelf.diff",
             "prop.list",
             "conflict.list",
+            "auth.logins",
             "ipc.cancel",
         };
 

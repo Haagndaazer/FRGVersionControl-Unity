@@ -964,21 +964,21 @@ Admins can disable the entire file locking system for the whole team.
 
 ### 11.3 Getting Help
 
-**Self-Diagnosis Steps**:
-1. Open Unity Console (Ctrl+Shift+C) and look for error messages
-2. Open Lock Manager and click Refresh
-3. Review Lock History for recent operations
-4. Check Git status in terminal: `git status`
-5. Test Git remote: `git fetch origin`
+**Report a Bug** (0.2.95): choose `FRG Version Control > Report a Bug...` (also a button in the
+Version Control Panel footer and in the Setup Wizard).
 
-**When Contacting Team Admin**:
+1. Give the problem a one-line title and say what happened. What you expected and the steps to
+   reproduce it are optional but help a lot.
+2. Click **Review Report**. The window has already collected the plugin and svn versions, where
+   the project sits in its SVN checkout, who is signed in, your last 60 version control actions
+   and the plugin's recent console messages.
+3. Read the report. Every part is editable: delete anything you don't want to share. Passwords
+   are never included, and anything that looks like one is masked.
+4. Click **Save Report**. The report is saved in the project's `.svn-tooling-config/bug-reports/`
+   folder (never committed) and copied to the clipboard. Paste it to Colton Dyck on Slack, or
+   attach the file, and add screenshots if they help.
 
-Provide the following information:
-- Error message from Console (copy exact text)
-- Screenshot of Lock Manager window
-- File path having the issue
-- What you were trying to do
-- Your Git email: `git config user.email`
+Nothing is sent anywhere by the plugin itself.
 
 ---
 

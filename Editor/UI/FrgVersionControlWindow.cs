@@ -9,6 +9,7 @@ using UnityEditor;
 using UnityEngine;
 using Debug = UnityEngine.Debug;
 using FRGVersionControl.Core;
+using FRGVersionControl.Core.BugReports;
 using FRGVersionControl.Core.Changelists;
 using FRGVersionControl.Core.IpcClient;
 using FRGVersionControl.Core.OverrideMode;
@@ -3785,6 +3786,11 @@ namespace FRGVersionControl.UI
             {
                 FileLockMaintenance.RunMaintenanceNow();
                 m_CacheReadAt = 0;
+            }
+            if (GUILayout.Button(new GUIContent("Report a Bug", "Save a bug report with logs, to send to " + BugReport.Recipient + "."),
+                                 EditorStyles.toolbarButton, GUILayout.Width(90)))
+            {
+                EditorApplication.delayCall += () => BugReportWindow.Open("the Version Control Panel", null);
             }
             EditorGUILayout.EndHorizontal();
         }

@@ -7,6 +7,8 @@ using UnityEngine;
 using FRGVersionControl.Core;
 using FRGVersionControl.Core.IpcClient;
 using FRGVersionControl.Core.Svn;
+using FRGVersionControl.Core.BugReports;
+using FRGVersionControl.UI;
 
 namespace FRGVersionControl.Tools
 {
@@ -103,6 +105,17 @@ namespace FRGVersionControl.Tools
             }
 
             if (m_ShowSignIn) DrawSignIn();
+
+            GUILayout.Space(10);
+            using (new EditorGUI.DisabledScope(m_Running || m_SigningIn))
+            {
+                if (GUILayout.Button(new GUIContent("Report a Bug...", "Saves a bug report that includes these results, for you to send to " + BugReport.Recipient + "."),
+                                     GUILayout.Height(22)))
+                {
+                    var log = m_StatusMessage;
+                    EditorApplication.delayCall += () => BugReportWindow.Open("the Setup Wizard", log);
+                }
+            }
 
             EditorGUILayout.EndScrollView();
         }
@@ -280,12 +293,15 @@ namespace FRGVersionControl.Tools
             Append("\n1. Checking the svn command-line client...");
             var version = await client.InvokeRawAsync("meta.version", "{}", client.BuildDefaultContext()).ConfigureAwait(true);
             var svnVersion = version.Ok ? IpcJson.ReadScalar(version.RawLine, "svnVersion", inResult: true) : null;
+            var svnPath = version.Ok ? IpcJson.ReadScalar(version.RawLine, "svnPath", inResult: true) : null;
             if (string.IsNullOrEmpty(svnVersion) || svnVersion == "not-found")
             {
-                Append("\n[FAIL] svn.exe was not found. Install TortoiseSVN with the 'command line client tools' option, then restart the editor.");
+                Append(string.IsNullOrEmpty(svnPath)
+                    ? "\n[FAIL] svn.exe was not found. Install TortoiseSVN with the 'command line client tools' option, then restart the editor."
+                    : $"\n[FAIL] {svnPath} did not report its version. Reinstall TortoiseSVN with the 'command line client tools' option, then restart the editor.");
                 return;
             }
-            Append($"\n[OK] svn {svnVersion}");
+            Append($"\n[OK] svn {svnVersion}" + (string.IsNullOrEmpty(svnPath) ? "" : $" ({svnPath})"));
 
             // Step 2: where the project folder sits in its working copy.
             Append("\n\n2. Checking the working copy...");

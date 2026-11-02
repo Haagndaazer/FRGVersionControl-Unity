@@ -75,6 +75,7 @@ namespace FRGVersionControl.Core.IpcClient
     {
         public string coreVersion;
         public string svnVersion;
+        public string svnPath;
         public int wireVersion;
     }
 

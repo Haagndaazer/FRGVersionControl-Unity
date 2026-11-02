@@ -9,6 +9,7 @@ using UnityEngine.TestTools;
 using FRGVersionControl.Core;
 using FRGVersionControl.Core.IpcClient;
 using FRGVersionControl.Core.Svn;
+using FRGVersionControl.Services;
 
 namespace FRGVersionControl.Tests
 {
@@ -21,6 +22,13 @@ namespace FRGVersionControl.Tests
     {
         private const int FileCount = 120;
         private static readonly string Folder = "Assets/batch-probe-" + System.DateTime.UtcNow.Ticks.ToString("x");
+
+        [TearDown]
+        public void RestoreBackgroundRefreshes()
+        {
+            FileLockSyncService.Enable();
+            if (!FileLockSvnDetectionService.IsEnabled) FileLockSvnDetectionService.Enable();
+        }
 
         [UnityTest]
         public IEnumerator RevertAndUnlock_120Files_IsOneRequestPerVerb_WithPerPathOutcomes()
@@ -79,24 +87,38 @@ namespace FRGVersionControl.Tests
             bool unchangedIsClean = preStatus != null && !(preStatus.TryGetValue(unchangedPath, out var preEntry) && SvnCommandRunner.IsChangedStatus(preEntry.status));
             UnityEngine.Debug.Log($"[BatchActionsIpcTests] {unchangedPath} clean before batch: {unchangedIsClean}");
 
-            int revertBefore = IpcSvnClient.RequestCount("mutate.revert");
-            int unlockBefore = IpcSvnClient.RequestCount("lock.release");
-            int histBefore = IpcSvnClient.RequestCount("hist.record");
-            int statusUBefore = IpcSvnClient.RequestCount("status.allEntries");
+            int revertDelta, unlockDelta, histDelta, statusDelta, statusDuringCompletion;
+            RevertUnlockBatchResult result;
+            var sw = new Stopwatch();
+            bool detectionWasEnabled = FileLockSvnDetectionService.IsEnabled;
+            FileLockSvnDetectionService.Disable();
+            FileLockSyncService.Disable();
+            try
+            {
+                int revertBefore = IpcSvnClient.RequestCount("mutate.revert");
+                int unlockBefore = IpcSvnClient.RequestCount("lock.release");
+                int histBefore = IpcSvnClient.RequestCount("hist.record");
+                int statusUBefore = IpcSvnClient.RequestCount("status.allEntries");
 
-            var sw = Stopwatch.StartNew();
-            var task = Task.Run(() => FileLockManager.Instance.RevertAndUnlockFilesAsync(selection));
-            while (!task.IsCompleted) yield return null;
-            sw.Stop();
-            var result = task.Result;
-            int revertDelta = IpcSvnClient.RequestCount("mutate.revert") - revertBefore;
-            int unlockDelta = IpcSvnClient.RequestCount("lock.release") - unlockBefore;
-            int histDelta = IpcSvnClient.RequestCount("hist.record") - histBefore;
-            int statusDelta = IpcSvnClient.RequestCount("status.allEntries") - statusUBefore;
-            int statusBeforeCompletion = IpcSvnClient.RequestCount("status.allEntries");
-            FileLockManager.Instance.ApplyRevertUnlockCompletion(result);
-            for (int i = 0; i < 5; i++) yield return null;
-            int statusDuringCompletion = IpcSvnClient.RequestCount("status.allEntries") - statusBeforeCompletion;
+                sw.Start();
+                var task = Task.Run(() => FileLockManager.Instance.RevertAndUnlockFilesAsync(selection));
+                while (!task.IsCompleted) yield return null;
+                sw.Stop();
+                result = task.Result;
+                revertDelta = IpcSvnClient.RequestCount("mutate.revert") - revertBefore;
+                unlockDelta = IpcSvnClient.RequestCount("lock.release") - unlockBefore;
+                histDelta = IpcSvnClient.RequestCount("hist.record") - histBefore;
+                statusDelta = IpcSvnClient.RequestCount("status.allEntries") - statusUBefore;
+                int statusBeforeCompletion = IpcSvnClient.RequestCount("status.allEntries");
+                FileLockManager.Instance.ApplyRevertUnlockCompletion(result);
+                for (int i = 0; i < 5; i++) yield return null;
+                statusDuringCompletion = IpcSvnClient.RequestCount("status.allEntries") - statusBeforeCompletion;
+            }
+            finally
+            {
+                FileLockSyncService.Enable();
+                if (detectionWasEnabled) FileLockSvnDetectionService.Enable();
+            }
             UnityEngine.Debug.Log($"[BatchActionsIpcTests] requests during batch: revert={revertDelta} unlock={unlockDelta} hist={histDelta} status.allEntries={statusDelta}; during completion (reimport): status.allEntries={statusDuringCompletion}");
             UnityEngine.Debug.Log($"[BatchActionsIpcTests] outcome: reverted={result.revertedCount} released={result.releasedCount} unknown={result.unknownPaths.Count} ({result.unknownReason}) failed={result.failureCount}");
             foreach (var f in result.GetFailed().Take(5)) UnityEngine.Debug.Log($"[BatchActionsIpcTests] failed: {f.path}: {f.errorMessage}");
@@ -105,7 +127,7 @@ namespace FRGVersionControl.Tests
             int expectedUnlockChunks = (FileCount + BatchOutcomes.ChunkSize / 2 - 1) / (BatchOutcomes.ChunkSize / 2);
             Assert.AreEqual(expectedUnlockChunks, unlockDelta, $"120 locked targets → {expectedUnlockChunks} unlock chunk(s)");
             Assert.AreEqual(1, histDelta, "one batched history record");
-            Assert.LessOrEqual(statusDelta, 3, "one lock-cache refresh plus the overlay refresh during the batch (one background tick tolerated)");
+            Assert.LessOrEqual(statusDelta, 3, "one lock-cache refresh plus the overlay refresh during the batch, and one more in a nested project (background refreshes paused)");
             Assert.LessOrEqual(statusDuringCompletion, 4, "the reimport of 120 files must not refresh status per asset");
 
             Assert.GreaterOrEqual(result.revertedCount, FileCount - 1, "every modified file reverted (svn may also report the unchanged locked file as reverted when it restores its read-only bit)");

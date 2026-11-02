@@ -56,6 +56,10 @@ namespace FRGVersionControl.Core
         private HashSet<string> m_LockableExtensions = new HashSet<string>();
 
         public bool IsInitialized => m_Initialized && !BuildPipeline.isBuildingPlayer;
+
+        /// <summary>True once svn-core has confirmed this project has no SVN login (the Setup
+        /// Wizard's sign-in is needed); false while that is unknown or after signing in.</summary>
+        public bool NeedsSignIn { get; private set; }
         public string UserEmail => m_UserEmail;
         public string UserName => m_UserName;
         public string MachineName => m_MachineName;
@@ -101,6 +105,7 @@ namespace FRGVersionControl.Core
 
         private void Initialize()
         {
+            NeedsSignIn = false;
             // First-run scaffold: copy package defaults into Assets/FRGVersionControl/ if missing.
             // Must run before any config-read; the IsFRGVersionControlEnabled() guard below
             // reads admin-config.json and would fail on a fresh package install otherwise.
@@ -155,7 +160,8 @@ namespace FRGVersionControl.Core
                     "then remove that field.");
             }
 
-            if (string.IsNullOrEmpty(m_UserName))
+            NeedsSignIn = string.IsNullOrEmpty(m_UserName);
+            if (NeedsSignIn)
             {
                 Debug.LogError(
                     "[FRGVersionControl] Not signed in to SVN for this project. " +
@@ -167,6 +173,12 @@ namespace FRGVersionControl.Core
                     SessionState.SetBool(SessionShownKey, true);
                     EditorApplication.delayCall += () =>
                     {
+                        if (!NeedsSignIn || EditorWindow.HasOpenInstances<FRGVersionControl.Tools.FileLockSetupWizard>()) return;
+                        if (EditorWindow.HasOpenInstances<FrgVersionControlWindow>())
+                        {
+                            FRGVersionControl.Tools.FileLockSetupWizard.ShowWizard();
+                            return;
+                        }
                         bool openWizard = EditorUtility.DisplayDialog(
                             "FRG Version Control: Sign in to SVN",
                             "FRG Version Control needs you to sign in to SVN for this project before it can manage locks.\n\n" +
@@ -241,6 +253,7 @@ namespace FRGVersionControl.Core
             var name = login.status.ProjectUsername
                        ?? (login.status.usesPasswordCache ? null : login.status.localUsername);
             if (string.IsNullOrEmpty(name)) return false;
+            NeedsSignIn = false;
             if (!string.Equals(name, m_UserName, StringComparison.Ordinal))
             {
                 m_UserName = name;

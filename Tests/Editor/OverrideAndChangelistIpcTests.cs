@@ -76,6 +76,16 @@ namespace FRGVersionControl.Tests
         }
 
         [Test]
+        public void SignedInProject_DoesNotAskForSignIn()
+        {
+            if (!ScratchWcGuard.IsScratch(out var reason)) Assert.Ignore("scratch guard: " + reason);
+            Assert.IsTrue(FileLockManager.Instance.IsInitialized);
+            Assert.IsFalse(FileLockManager.Instance.NeedsSignIn, "the panel must not open the Setup Wizard for a project that has a login");
+            Assert.IsTrue(FileLockManager.Instance.ReloadIdentity());
+            Assert.IsFalse(FileLockManager.Instance.NeedsSignIn);
+        }
+
+        [Test]
         public void ChangelistNames_CreateRenameDelete_ThroughTheCore()
         {
             if (!ScratchWcGuard.IsScratch(out var reason)) Assert.Ignore("scratch guard: " + reason);

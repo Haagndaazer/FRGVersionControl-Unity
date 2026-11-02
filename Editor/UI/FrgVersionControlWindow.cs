@@ -42,6 +42,24 @@ namespace FRGVersionControl.UI
             var w = GetWindow<FrgVersionControlWindow>("FRG Version Control");
             w.minSize = new Vector2(640, 360);
             w.Show();
+            EditorApplication.delayCall += OpenSetupWizardIfNotSignedIn;
+        }
+
+        private const string RestoredPanelOpenedWizardKey = "FRGVersionControl.PanelOpenedSetupWizardThisSession";
+
+        /// <summary>Opens the Setup Wizard when svn-core has confirmed this project is not signed in to
+        /// SVN, so the panel never sits there unable to lock or commit without saying why.</summary>
+        private static void OpenSetupWizardIfNotSignedIn()
+        {
+            if (FileLockManager.Instance.NeedsSignIn) FileLockSetupWizard.ShowWizard();
+        }
+
+        private static void OpenSetupWizardOncePerSession()
+        {
+            if (SessionState.GetBool(RestoredPanelOpenedWizardKey, false)) return;
+            if (!FileLockManager.Instance.NeedsSignIn) return;
+            SessionState.SetBool(RestoredPanelOpenedWizardKey, true);
+            FileLockSetupWizard.ShowWizard();
         }
 
         // ----- Tab state (EditorPrefs across-session) -----
@@ -198,6 +216,7 @@ namespace FRGVersionControl.UI
             // first paint — fixes the pre-0.2.18 lazy-load gap where shelves only appeared
             // after the user created a new one (which forced a cache refresh).
             RefreshShelvesCache();
+            EditorApplication.delayCall += OpenSetupWizardOncePerSession;
         }
 
         private void OnDisable()

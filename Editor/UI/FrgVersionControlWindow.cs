@@ -141,6 +141,12 @@ namespace FRGVersionControl.UI
         // stale paths (resolved/converted overrides) don't linger.
         private HashSet<string> m_SelectedOverridePaths = new HashSet<string>(PathKey.Comparer);
 
+        private readonly ShiftClickRange m_ChangeRange = new ShiftClickRange(PathKey.Comparer);
+        private readonly ShiftClickRange m_OverrideRange = new ShiftClickRange(PathKey.Comparer);
+        private readonly ShiftClickRange m_LockRange = new ShiftClickRange(StringComparer.Ordinal);
+        private static readonly GUIContent s_CheckboxHint = new GUIContent(string.Empty,
+            "Shift-click to set every file between this one and the last one you clicked.");
+
         // Slice 1: per-changelist-group foldout state. Default expanded. Survives rebuilds.
         // Keyed by group name (NO_CHANGELIST_GROUP_NAME / user changelist name).
         private Dictionary<string, bool> m_GroupExpandedState = new Dictionary<string, bool>();
@@ -601,6 +607,9 @@ namespace FRGVersionControl.UI
                 m_ActiveTab = (Tab)newTab;
                 ProjectPrefs.SetInt(TAB_PREFS_KEY, newTab);
                 m_SelectedLockPaths.Clear(); // selection state is per-tab; reset on switch
+                m_ChangeRange.Clear();
+                m_OverrideRange.Clear();
+                m_LockRange.Clear();
             }
 
             if (m_ActiveTab == Tab.Changes) DrawChangesTab();
@@ -1101,6 +1110,8 @@ namespace FRGVersionControl.UI
             {
                 m_ChangesSearchFilter = newFilter;
                 ProjectPrefs.SetString(CHANGES_SEARCH_PREFS_KEY, m_ChangesSearchFilter ?? "");
+                m_ChangeRange.ResetAnchor();
+                m_OverrideRange.ResetAnchor();
             }
             string lastRefreshTxt = SvnStatusCache.LastRefreshUtc == DateTime.MinValue
                 ? "never"
@@ -1177,6 +1188,8 @@ namespace FRGVersionControl.UI
                     ? "Refreshing working-copy status…"
                     : "No pending changes. Working copy is clean.",
                     MessageType.Info);
+                m_ChangeRange.Clear();
+                m_OverrideRange.Clear();
                 // Even with a clean WC, shelves should still be visible (restoring a shelf
                 // back into a clean WC is a common workflow).
                 m_Scroll = EditorGUILayout.BeginScrollView(m_Scroll);
@@ -1223,6 +1236,8 @@ namespace FRGVersionControl.UI
             EditorGUILayout.EndHorizontal();
 
             m_Scroll = EditorGUILayout.BeginScrollView(m_Scroll);
+            m_ChangeRange.BeginPass();
+            m_OverrideRange.BeginPass();
 
             // Track "did we render anything yet" to drive 15px spacers between section
             // TYPES (changelists / ignore-on-commit / shelves). No spacing within a type.
@@ -1275,6 +1290,8 @@ namespace FRGVersionControl.UI
             if (somethingRendered) GUILayout.Space(15);
             DrawShelfSections();
 
+            m_ChangeRange.EndPass();
+            m_OverrideRange.EndPass();
             EditorGUILayout.EndScrollView();
 
             // Blur-commit for inline rename. After we've successfully focused the rename
@@ -1757,7 +1774,7 @@ namespace FRGVersionControl.UI
             if (selectable.HasValue)
             {
                 bool was = selectable.Value;
-                bool now = EditorGUILayout.Toggle(was, GUILayout.Width(20));
+                bool now = RowCheckbox(was);
                 if (now != was) onSelectChanged?.Invoke(now);
             }
             else
@@ -1816,7 +1833,7 @@ namespace FRGVersionControl.UI
         private void DrawRow(Row r)
         {
             bool isConflict = r.status == SvnFileStatus.Conflict;
-            bool isOverride = r.isOverride && !isConflict; // conflict trumps override visually
+            bool isOverride = IsOverrideListRow(r.isOverride, r.status);
 
             // ----- Main row line (checkbox / icon / path / lock tag / inline override actions) -----
             // (Pre-0.2.23 painted an amber wash on override rows; dropped per user feedback.
@@ -1855,18 +1872,10 @@ namespace FRGVersionControl.UI
             bool currentlySelected = isOverride
                 ? m_SelectedOverridePaths.Contains(r.path)
                 : r.selected;
-            DrawFileRowInner(in spec, currentlySelected, now =>
-            {
-                if (isOverride)
-                {
-                    if (now) m_SelectedOverridePaths.Add(r.path);
-                    else m_SelectedOverridePaths.Remove(r.path);
-                }
-                else
-                {
-                    r.selected = now;
-                }
-            }, onFilenameClick: () =>
+            (isOverride ? m_OverrideRange : m_ChangeRange).Add(r.path);
+            DrawFileRowInner(in spec, currentlySelected,
+                now => ApplyRowCheck(r, isOverride, now, Event.current != null && Event.current.shift),
+                onFilenameClick: () =>
             {
                 if (isConflict || isOverride)
                 {
@@ -1942,6 +1951,58 @@ namespace FRGVersionControl.UI
                 DrawOverrideExpandedMetadata(r);
             }
         }
+
+        private static bool RowCheckbox(bool value)
+        {
+            bool now = EditorGUILayout.Toggle(value, GUILayout.Width(20));
+            if (Event.current.type == EventType.Repaint) GUI.Label(GUILayoutUtility.GetLastRect(), s_CheckboxHint);
+            return now;
+        }
+
+        /// <summary>Applies a checkbox click on a Changes-tab row, and with Shift held to every
+        /// visible row of the same list between it and the last row clicked. Regular rows and
+        /// ignore-on-commit rows are separate lists and never set each other.</summary>
+        private void ApplyRowCheck(Row clicked, bool overrideList, bool now, bool shift)
+        {
+            var range = overrideList ? m_OverrideRange : m_ChangeRange;
+            var keys = range.Resolve(clicked.path, shift);
+            if (keys.Count <= 1)
+            {
+                SetRowChecked(clicked, overrideList, now);
+                return;
+            }
+
+            var byPath = new Dictionary<string, Row>(PathKey.Comparer);
+            foreach (var row in m_Rows) byPath[row.path] = row;
+
+            foreach (var key in keys)
+            {
+                if (byPath.TryGetValue(key, out var row) && IsOverrideListRow(row.isOverride, row.status) == overrideList)
+                {
+                    SetRowChecked(row, overrideList, now);
+                }
+            }
+            Repaint();
+        }
+
+        private void SetRowChecked(Row row, bool overrideList, bool now)
+        {
+            if (overrideList)
+            {
+                if (now) m_SelectedOverridePaths.Add(row.path);
+                else m_SelectedOverridePaths.Remove(row.path);
+            }
+            else
+            {
+                row.selected = now;
+            }
+        }
+
+        /// <summary>True when a Changes-tab row is in the ignore-on-commit list
+        /// (<c>m_SelectedOverridePaths</c>) rather than the regular list (<c>Row.selected</c>).
+        /// A conflict is always a regular row.</summary>
+        internal static bool IsOverrideListRow(bool isOverride, SvnFileStatus status)
+            => isOverride && status != SvnFileStatus.Conflict;
 
         private void ShowRowContextMenu(Row r)
         {
@@ -3129,11 +3190,18 @@ namespace FRGVersionControl.UI
             }
 
             GUILayout.Space(10);
+            string prevSearch = m_LocksSearchFilter;
+            bool prevOnlyMine = m_ShowOnlyMyLocks;
+            bool prevStale = m_ShowStaleLocks;
             m_LocksSearchFilter = GUILayout.TextField(m_LocksSearchFilter, EditorStyles.toolbarSearchField, GUILayout.ExpandWidth(true));
             GUILayout.Space(10);
 
             m_ShowOnlyMyLocks = GUILayout.Toggle(m_ShowOnlyMyLocks, "My Locks Only", EditorStyles.toolbarButton);
             m_ShowStaleLocks = GUILayout.Toggle(m_ShowStaleLocks, "Show Stale", EditorStyles.toolbarButton);
+            if (m_LocksSearchFilter != prevSearch || m_ShowOnlyMyLocks != prevOnlyMine || m_ShowStaleLocks != prevStale)
+            {
+                m_LockRange.ResetAnchor();
+            }
 
             GUILayout.FlexibleSpace();
 
@@ -3207,6 +3275,7 @@ namespace FRGVersionControl.UI
                     "3. Restart Unity",
                     MessageType.Warning);
                 EditorGUILayout.Space(10);
+                m_LockRange.Clear();
                 return;
             }
 
@@ -3220,14 +3289,17 @@ namespace FRGVersionControl.UI
             if (filteredLocks.Count == 0)
             {
                 EditorGUILayout.HelpBox("No locks found.", MessageType.Info);
+                m_LockRange.Clear();
                 return;
             }
 
             m_LocksScroll = EditorGUILayout.BeginScrollView(m_LocksScroll);
+            m_LockRange.BeginPass();
             foreach (var fileLock in filteredLocks.OrderBy(l => l.path, StringComparer.OrdinalIgnoreCase))
             {
                 DrawLockEntry(fileLock);
             }
+            m_LockRange.EndPass();
             EditorGUILayout.EndScrollView();
         }
 
@@ -3248,12 +3320,12 @@ namespace FRGVersionControl.UI
             // Checkbox (disabled when can't unlock)
             if (canUnlock)
             {
+                m_LockRange.Add(fileLock.path);
                 bool isSelected = m_SelectedLockPaths.Contains(fileLock.path);
-                bool newSelected = EditorGUILayout.Toggle(isSelected, GUILayout.Width(20));
+                bool newSelected = RowCheckbox(isSelected);
                 if (newSelected != isSelected)
                 {
-                    if (newSelected) m_SelectedLockPaths.Add(fileLock.path);
-                    else             m_SelectedLockPaths.Remove(fileLock.path);
+                    ApplyLockCheck(fileLock.path, newSelected, Event.current != null && Event.current.shift);
                 }
             }
             else
@@ -3307,6 +3379,34 @@ namespace FRGVersionControl.UI
             }
 
             EditorGUILayout.Space();
+        }
+
+        /// <summary>Applies a checkbox click on a Locks-tab row, and with Shift held to every
+        /// visible lock between it and the last one clicked. Only locks the user can unlock
+        /// are ever selected.</summary>
+        private void ApplyLockCheck(string clickedPath, bool now, bool shift)
+        {
+            var keys = m_LockRange.Resolve(clickedPath, shift);
+            if (keys.Count == 0) return;
+
+            var unlockable = new HashSet<string>(StringComparer.Ordinal);
+            foreach (var fl in FileLockManager.Instance.GetAllLocks())
+            {
+                if (CanUnlockLock(fl)) unlockable.Add(fl.path);
+            }
+
+            foreach (var key in keys)
+            {
+                if (now)
+                {
+                    if (unlockable.Contains(key)) m_SelectedLockPaths.Add(key);
+                }
+                else
+                {
+                    m_SelectedLockPaths.Remove(key);
+                }
+            }
+            if (keys.Count > 1) Repaint();
         }
 
         private void DrawLockActionButtons(FileLock fileLock, bool isMyLock, bool isStale)

@@ -1,3 +1,4 @@
+using System;
 using System.Collections.Generic;
 using System.Linq;
 using UnityEditor;
@@ -18,6 +19,7 @@ namespace FRGVersionControl.UI
         private string m_LogMessage = "";
         private Vector2 m_Scroll;
         private bool m_FocusedNameField = false;
+        private readonly ShiftClickRange m_Range = new ShiftClickRange(StringComparer.Ordinal);
 
         public static void Show(FrgVersionControlWindow owner, List<string> eligible, List<string> initialSelected)
         {
@@ -69,8 +71,15 @@ namespace FRGVersionControl.UI
                 bool now = EditorGUILayout.ToggleLeft(p, was);
                 if (now != was)
                 {
+                    var keys = m_Range.Resolve(m_Eligible, p, Event.current.shift);
                     if (now) m_Selected.Add(p);
                     else m_Selected.Remove(p);
+                    foreach (var key in keys)
+                    {
+                        if (now) m_Selected.Add(key);
+                        else m_Selected.Remove(key);
+                    }
+                    if (keys.Count > 1) Repaint();
                 }
             }
             EditorGUILayout.EndScrollView();

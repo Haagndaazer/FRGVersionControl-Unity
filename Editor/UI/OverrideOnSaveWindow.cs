@@ -34,6 +34,7 @@ namespace FRGVersionControl.UI
 
         private List<Item> m_Items;
         private Vector2 m_Scroll;
+        private readonly ShiftClickRange m_Range = new ShiftClickRange(PathKey.Comparer);
         private int m_OtherSaveableCount;   // size of the rest of the save batch that's NOT blocked
 
         public static OverrideOnSaveWindow Create(
@@ -102,11 +103,24 @@ namespace FRGVersionControl.UI
             GUILayout.Space(6);
         }
 
+        private void ApplyCheck(Item clicked, bool now, bool shift)
+        {
+            var keys = m_Range.Resolve(m_Items.Select(i => i.path).ToList(), clicked.path, shift);
+            var inRange = new HashSet<string>(keys, PathKey.Comparer);
+            clicked.selected = now;
+            foreach (var i in m_Items)
+            {
+                if (inRange.Contains(i.path)) i.selected = now;
+            }
+            if (keys.Count > 1) Repaint();
+        }
+
         private void DrawRow(Item item)
         {
             EditorGUILayout.BeginHorizontal();
 
-            item.selected = EditorGUILayout.Toggle(item.selected, GUILayout.Width(20));
+            bool now = EditorGUILayout.Toggle(item.selected, GUILayout.Width(20));
+            if (now != item.selected) ApplyCheck(item, now, Event.current.shift);
 
             // Status glyph: always "M" for these rows — the user is mid-save, so the
             // working-tree edit is pending. Mirrors the Changes-tab StatusGlyph for

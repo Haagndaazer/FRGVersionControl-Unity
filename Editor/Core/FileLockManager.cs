@@ -57,9 +57,14 @@ namespace FRGVersionControl.Core
 
         public bool IsInitialized => m_Initialized && !BuildPipeline.isBuildingPlayer;
 
-        /// <summary>True once svn-core has confirmed this project has no SVN login (the Setup
-        /// Wizard's sign-in is needed); false while that is unknown or after signing in.</summary>
-        public bool NeedsSignIn { get; private set; }
+        private bool m_NoLogin;
+        private bool m_CanSignIn;
+        private bool m_NameFromAdminConfig;
+
+        /// <summary>True when the Setup Wizard's sign-in is needed: svn-core confirmed this project
+        /// has no SVN login, or svn rejected the login since the last sign-in. False while that is
+        /// unknown, and where file locking is turned off or svn is missing.</summary>
+        public bool NeedsSignIn => m_NoLogin || (m_CanSignIn && m_IpcClient != null && m_IpcClient.LoginRejected);
         public string UserEmail => m_UserEmail;
         public string UserName => m_UserName;
         public string MachineName => m_MachineName;
@@ -105,7 +110,8 @@ namespace FRGVersionControl.Core
 
         private void Initialize()
         {
-            NeedsSignIn = false;
+            m_NoLogin = false;
+            m_CanSignIn = false;
             // First-run scaffold: copy package defaults into Assets/FRGVersionControl/ if missing.
             // Must run before any config-read; the IsFRGVersionControlEnabled() guard below
             // reads admin-config.json and would fail on a fresh package install otherwise.
@@ -126,6 +132,7 @@ namespace FRGVersionControl.Core
                                "Install TortoiseSVN with command-line client tools at the default location.");
                 return;
             }
+            m_CanSignIn = true;
 
             // Load admin config — display name + email come from there (used for
             // history records). SVN username is NOT stored in any committed file
@@ -146,22 +153,23 @@ namespace FRGVersionControl.Core
                 return;
             }
 
-            var loginName = login.status.ProjectUsername
-                            ?? (login.status.usesPasswordCache ? null : login.status.localUsername);
+            var loginName = LoginNameFrom(login.status);
+            m_NameFromAdminConfig = false;
             if (!string.IsNullOrEmpty(loginName))
             {
                 m_UserName = loginName;
             }
             else if (!string.IsNullOrEmpty(m_UserName))
             {
+                m_NameFromAdminConfig = true;
                 Debug.LogWarning(
                     "[FRGVersionControl] Using deprecated currentSvnUsername from admin-config.json " +
                     $"('{m_UserName}'). Sign in with the Setup Wizard (FRG Version Control → Setup Wizard), " +
                     "then remove that field.");
             }
 
-            NeedsSignIn = string.IsNullOrEmpty(m_UserName);
-            if (NeedsSignIn)
+            m_NoLogin = string.IsNullOrEmpty(m_UserName);
+            if (m_NoLogin)
             {
                 Debug.LogError(
                     "[FRGVersionControl] Not signed in to SVN for this project. " +
@@ -246,14 +254,16 @@ namespace FRGVersionControl.Core
                 m_IdentityErrorLogged = false;
                 m_IdentityRetries = 0;
                 Initialize();
+                if (m_Initialized) IpcClient.ClearLoginRejected();
                 return m_Initialized;
             }
             var login = SvnLogin.FetchStatus();
             if (login.status == null) return false;
-            var name = login.status.ProjectUsername
-                       ?? (login.status.usesPasswordCache ? null : login.status.localUsername);
+            var name = LoginNameFrom(login.status);
             if (string.IsNullOrEmpty(name)) return false;
-            NeedsSignIn = false;
+            m_NoLogin = false;
+            m_NameFromAdminConfig = false;
+            IpcClient.ClearLoginRejected();
             if (!string.Equals(name, m_UserName, StringComparison.Ordinal))
             {
                 m_UserName = name;
@@ -261,6 +271,28 @@ namespace FRGVersionControl.Core
             }
             try { RefreshLockCache(); } catch { }
             return true;
+        }
+
+        /// <summary>The username this project works as: its saved SVN login, or for a URL with no
+        /// SVN passwords (file:, svn+ssh:) the local name svn records. Null when it needs signing in.</summary>
+        internal static string LoginNameFrom(SvnLogin.Status status)
+        {
+            if (status == null) return null;
+            return status.ProjectUsername ?? (status.usesPasswordCache ? null : status.localUsername);
+        }
+
+        /// <summary>Applies a fresh auth.logins answer on the main thread: a project without a login
+        /// needs signing in; a login that appeared since (or after an unreadable start) is picked up.
+        /// Does nothing where file locking is turned off or svn is missing.</summary>
+        public void ApplyLoginStatus(SvnLogin.Status status)
+        {
+            if (!m_CanSignIn || status == null) return;
+            if (string.IsNullOrEmpty(LoginNameFrom(status)))
+            {
+                if (!m_NameFromAdminConfig) m_NoLogin = true;
+                return;
+            }
+            if (m_NoLogin || !m_Initialized) ReloadIdentity();
         }
 
         /// <summary>
@@ -438,6 +470,7 @@ namespace FRGVersionControl.Core
             {
                 var svnLockMap = TryRefreshViaIpc();
                 if (svnLockMap == null) return false;
+                IpcClient.ClearLoginRejected();
                 m_CachedLocks = FileLocks.FromSvnLockInfoMap(svnLockMap, LockOwnerIdentifier);
 
                 Debug.Log($"[FRGVersionControl] Refreshed locks: {m_CachedLocks.locks.Count} active locks");

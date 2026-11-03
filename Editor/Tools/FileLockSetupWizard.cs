@@ -371,6 +371,8 @@ namespace FRGVersionControl.Tools
                 Append($"\n[FAIL] The SVN server did not accept the request: {SetupWizardText.LastLine(message)}\n   {action}");
                 return;
             }
+            client.ClearLoginRejected();
+            FileLockManager.Instance.ApplyLoginStatus(status);
             var wcRevision = await client.InvokeRawAsync("meta.info", "{}", client.BuildDefaultContext()).ConfigureAwait(true);
             var rev = wcRevision.Ok ? IpcJson.ReadScalar(wcRevision.RawLine, "revision", inResult: true) : null;
             Append($"\n[OK] Server reachable at {layout.info.projectUrl}" + (string.IsNullOrEmpty(rev) ? "" : $" (working copy at r{rev})"));

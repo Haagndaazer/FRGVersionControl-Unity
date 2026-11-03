@@ -102,6 +102,43 @@ namespace FRGVersionControl.Core.IpcClient
         }
         private System.Diagnostics.Stopwatch m_RequestStopwatch = new System.Diagnostics.Stopwatch();
 
+        private readonly object m_LoginLock = new object();
+        private bool m_LoginRejected;
+        private int m_LoginEpoch;
+
+        /// <summary>True when svn rejected this project's login (error kind <c>auth_failed</c>)
+        /// since the last <see cref="ClearLoginRejected"/>.</summary>
+        public bool LoginRejected
+        {
+            get { lock (m_LoginLock) return m_LoginRejected; }
+        }
+
+        /// <summary>Forgets a rejected login, after a sign-in or a request the server accepted.
+        /// A request that started before this call and is rejected afterwards does not set it again.</summary>
+        public void ClearLoginRejected()
+        {
+            lock (m_LoginLock)
+            {
+                m_LoginEpoch++;
+                m_LoginRejected = false;
+            }
+        }
+
+        internal static bool IsLoginRejection(IpcRawResult r) => r != null && !r.Ok && r.ErrorKind == "auth_failed";
+
+        internal int LoginEpoch
+        {
+            get { lock (m_LoginLock) return m_LoginEpoch; }
+        }
+
+        internal void NoteLoginRejected(int epoch)
+        {
+            lock (m_LoginLock)
+            {
+                if (epoch == m_LoginEpoch) m_LoginRejected = true;
+            }
+        }
+
         public IpcSvnClient(SvnCoreProcess process, IFrgLogger logger, IProjectPaths paths)
         {
             m_Process = process;
@@ -213,6 +250,7 @@ namespace FRGVersionControl.Core.IpcClient
             }
             if (string.IsNullOrEmpty(argsJson)) argsJson = "{}";
             if (ctx == null) ctx = BuildDefaultContext();
+            int loginEpoch = LoginEpoch;
 
             var id = "u" + Interlocked.Increment(ref m_RequestCounter).ToString();
             RequestCounts.AddOrUpdate(op, 1, (_, c) => c + 1);
@@ -268,7 +306,9 @@ namespace FRGVersionControl.Core.IpcClient
                     ElapsedMs = sw.ElapsedMilliseconds,
                 };
             }
-            return ParseRaw(op, line, sw.ElapsedMilliseconds);
+            var parsed = ParseRaw(op, line, sw.ElapsedMilliseconds);
+            if (IsLoginRejection(parsed)) NoteLoginRejected(loginEpoch);
+            return parsed;
         }
 
         private static IpcRawResult BusyResult(string op, long elapsedMs)

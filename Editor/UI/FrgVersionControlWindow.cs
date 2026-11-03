@@ -43,13 +43,42 @@ namespace FRGVersionControl.UI
             var w = GetWindow<FrgVersionControlWindow>("FRG Version Control");
             w.minSize = new Vector2(640, 360);
             w.Show();
-            EditorApplication.delayCall += OpenSetupWizardIfNotSignedIn;
+            _ = CheckSignInThenOpenWizardAsync();
         }
 
         private const string RestoredPanelOpenedWizardKey = "FRGVersionControl.PanelOpenedSetupWizardThisSession";
 
-        /// <summary>Opens the Setup Wizard when svn-core has confirmed this project is not signed in to
-        /// SVN, so the panel never sits there unable to lock or commit without saying why.</summary>
+        /// <summary>Reads this project's SVN login every time the panel is opened (local files, no
+        /// server contact), then opens the Setup Wizard when the project has no login or svn rejected
+        /// it. When svn-core cannot answer (busy, unavailable) the state already known decides.</summary>
+        private static async Task CheckSignInThenOpenWizardAsync()
+        {
+            SvnLogin.StatusResult login;
+            try
+            {
+                _ = FileLockManager.Instance;
+                login = await SvnLogin.FetchStatusAsync().ConfigureAwait(false);
+            }
+            catch (Exception e)
+            {
+                login = new SvnLogin.StatusResult { error = e.Message };
+            }
+            SvnCommandRunner.s_UnityMainSync.Post(_ =>
+            {
+                try
+                {
+                    if (login.status != null) FileLockManager.Instance.ApplyLoginStatus(login.status);
+                    OpenSetupWizardIfNotSignedIn();
+                }
+                catch (Exception e)
+                {
+                    Debug.LogWarning($"[FRGVersionControl] Could not check this project's SVN login: {e.Message}");
+                }
+            }, null);
+        }
+
+        /// <summary>Opens the Setup Wizard when this project needs signing in to SVN, so the panel
+        /// never sits there unable to lock or commit without saying why.</summary>
         private static void OpenSetupWizardIfNotSignedIn()
         {
             if (FileLockManager.Instance.NeedsSignIn) FileLockSetupWizard.ShowWizard();

@@ -349,7 +349,8 @@ namespace FRGVersionControl.UI
 
         /// <summary>
         /// Build a horizontal cluster of N rects anchored to the right edge (list view) or
-        /// bottom-right corner (icon view) of <paramref name="rect"/>. Used by
+        /// top-right corner of the thumbnail (icon view) of <paramref name="rect"/>. Icon view
+        /// must stay off the filename strip: Unity sets its own filename tooltip there. Used by
         /// OnProjectWindowItemGUI to lay out the [svn-status?][meta?][lock?] glyph cluster
         /// with consistent spacing regardless of how many slots are populated.
         /// </summary>
@@ -366,7 +367,7 @@ namespace FRGVersionControl.UI
             float startX = rect.x + rect.width - clusterWidth - rightPadding;
             float y = isListView
                 ? rect.y + (rect.height - iconSize) / 2f
-                : rect.y + rect.height - iconSize - 2f;
+                : rect.y + 2f;
 
             var rects = new Rect[slotCount];
             for (int i = 0; i < slotCount; i++)

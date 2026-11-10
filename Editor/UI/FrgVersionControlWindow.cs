@@ -182,6 +182,17 @@ namespace FRGVersionControl.UI
 
         // Slice 1: Changes-tab search/filter text. View filter only — never mutates rows.
         private const string CHANGES_SEARCH_PREFS_KEY = "FrgVersionControl.ChangesSearch";
+        private const string DIFF_SHOW_PREFS_KEY = "FrgVersionControl.DiffPaneShown";
+        private const string DIFF_HEIGHT_PREFS_KEY = "FrgVersionControl.DiffPaneHeight";
+        private const float DIFF_MIN_HEIGHT = 90f;
+        private const float DIFF_SPLITTER_HEIGHT = 5f;
+        private static readonly Color s_DiffRowHighlight = new Color(0.3f, 0.55f, 1f, 0.2f);
+        private static readonly int s_DiffSplitterHash = "FrgDiffSplitter".GetHashCode();
+
+        private DiffPane m_DiffPane;
+        private string m_DiffPath;
+        private bool m_ShowDiffPane;
+        private float m_DiffPaneHeight;
         private string m_ChangesSearchFilter = "";
 
         // Slice 1: cleanup recovery banner. Set when an svn op surfaces E155004 / E155010 /
@@ -242,6 +253,10 @@ namespace FRGVersionControl.UI
         {
             m_ActiveTab = (Tab)ProjectPrefs.GetInt(TAB_PREFS_KEY, 0);
             m_ChangesSearchFilter = ProjectPrefs.GetString(CHANGES_SEARCH_PREFS_KEY, "");
+            m_ShowDiffPane = ProjectPrefs.GetBool(DIFF_SHOW_PREFS_KEY, true);
+            m_DiffPaneHeight = ProjectPrefs.GetInt(DIFF_HEIGHT_PREFS_KEY, 220);
+            m_DiffPane = new DiffPane(Repaint);
+            m_DiffPath = null;
             SvnStatusCache.SnapshotUpdated += OnSnapshotUpdated;
             EnsureConflictIconLoaded();
             // Trigger an initial refresh so the panel populates on first open.
@@ -258,6 +273,7 @@ namespace FRGVersionControl.UI
         private void OnDisable()
         {
             SvnStatusCache.SnapshotUpdated -= OnSnapshotUpdated;
+            m_DiffPane?.Dispose();
             // Phase 4 polish: destroy any lingering preview textures (Unity does NOT garbage-collect
             // Texture2D objects created via LoadImage — they leak unless DestroyImmediate'd).
             foreach (var r in m_Rows)
@@ -289,6 +305,7 @@ namespace FRGVersionControl.UI
             // cleanup-recovery banner has resolved itself implicitly.
             m_CleanupBannerNeeded = false;
             RebuildRowsFromCache();
+            SyncDiffPane();
             Repaint();
 
             // Slice 1 follow-up: surface delete-empty-changelist prompts queued by a prior
@@ -654,6 +671,7 @@ namespace FRGVersionControl.UI
             DrawRows();
             // Shelf sections render inside DrawRows (inside the scroll view) so they sit
             // immediately after the override section visually, scrolling together.
+            if (m_ShowDiffPane) DrawDiffPane();
             DrawCommitArea();
             DrawStatusBanner();
         }
@@ -1160,7 +1178,96 @@ namespace FRGVersionControl.UI
                 CreateChangelistAndStartRename();
             }
             GUILayout.FlexibleSpace();
+            bool showDiff = GUILayout.Toggle(m_ShowDiffPane, new GUIContent("Changes Preview",
+                    "Show what changed in the file you click: the committed version beside your version."),
+                    EditorStyles.toolbarButton, GUILayout.Width(110));
+            if (showDiff != m_ShowDiffPane)
+            {
+                m_ShowDiffPane = showDiff;
+                ProjectPrefs.SetBool(DIFF_SHOW_PREFS_KEY, showDiff);
+                if (showDiff) SyncDiffPane();
+            }
             EditorGUILayout.EndHorizontal();
+        }
+
+        private static string DiffStatusKey(Row r) => r.status + "|" + r.isOverride;
+
+        /// <summary>Makes <paramref name="r"/> the row whose changes the preview pane shows.</summary>
+        private void SetDiffRow(Row r)
+        {
+            m_DiffPath = r.path;
+            if (m_ShowDiffPane) m_DiffPane?.Show(r.path, DiffStatusKey(r));
+            Repaint();
+        }
+
+        /// <summary>After the row list changed: re-check the previewed file, or drop the preview
+        /// when its row is gone (committed, reverted).</summary>
+        private void SyncDiffPane()
+        {
+            if (m_DiffPane == null || m_DiffPath == null) return;
+            Row row = null;
+            foreach (var r in m_Rows)
+            {
+                if (PathKey.Same(r.path, m_DiffPath)) { row = r; break; }
+            }
+            if (row == null)
+            {
+                m_DiffPath = null;
+                m_DiffPane.Clear();
+                return;
+            }
+            if (m_ShowDiffPane) m_DiffPane.Show(row.path, DiffStatusKey(row));
+        }
+
+        private const float DIFF_RESERVED_HEIGHT = 340f;
+
+        /// <summary>Keeps the pane between its minimum and what the window can spare once the
+        /// toolbars, a few list rows, the commit area and the footer have their room.</summary>
+        private float ClampDiffPaneHeight(float height)
+        {
+            float max = Mathf.Max(DIFF_MIN_HEIGHT, Mathf.Min(position.height * 0.6f, position.height - DIFF_RESERVED_HEIGHT));
+            return Mathf.Clamp(height, DIFF_MIN_HEIGHT, max);
+        }
+
+        private void DrawDiffPane()
+        {
+            var splitter = GUILayoutUtility.GetRect(0f, DIFF_SPLITTER_HEIGHT, GUILayout.ExpandWidth(true));
+            EditorGUIUtility.AddCursorRect(splitter, MouseCursor.ResizeVertical);
+            int id = GUIUtility.GetControlID(s_DiffSplitterHash, FocusType.Passive);
+            var e = Event.current;
+            switch (e.GetTypeForControl(id))
+            {
+                case EventType.MouseDown:
+                    if (e.button == 0 && splitter.Contains(e.mousePosition))
+                    {
+                        GUIUtility.hotControl = id;
+                        e.Use();
+                    }
+                    break;
+                case EventType.MouseDrag:
+                    if (GUIUtility.hotControl == id)
+                    {
+                        m_DiffPaneHeight = ClampDiffPaneHeight(m_DiffPaneHeight - e.delta.y);
+                        e.Use();
+                        Repaint();
+                    }
+                    break;
+                case EventType.MouseUp:
+                    if (GUIUtility.hotControl == id)
+                    {
+                        GUIUtility.hotControl = 0;
+                        ProjectPrefs.SetInt(DIFF_HEIGHT_PREFS_KEY, Mathf.RoundToInt(m_DiffPaneHeight));
+                        e.Use();
+                    }
+                    break;
+                case EventType.Repaint:
+                    EditorGUI.DrawRect(new Rect(splitter.x, splitter.y + 2f, splitter.width, 1f), new Color(0.5f, 0.5f, 0.5f, 0.6f));
+                    break;
+            }
+
+            float height = ClampDiffPaneHeight(m_DiffPaneHeight);
+            var rect = GUILayoutUtility.GetRect(0f, height, GUILayout.ExpandWidth(true));
+            m_DiffPane?.Draw(rect);
         }
 
         // Slice 5: modular section widget. Used by user changelist groups, the
@@ -1868,6 +1975,10 @@ namespace FRGVersionControl.UI
             // (Pre-0.2.23 painted an amber wash on override rows; dropped per user feedback.
             // The IGN status badge in the row's status column remains as the override identifier.)
             var rowRect = EditorGUILayout.BeginHorizontal();
+            if (Event.current.type == EventType.Repaint && m_ShowDiffPane && m_DiffPath != null && PathKey.Same(m_DiffPath, r.path))
+            {
+                EditorGUI.DrawRect(rowRect, s_DiffRowHighlight);
+            }
 
             // Slice 1: drag-and-drop source. Only regular non-conflict rows can be dragged.
             // Dragging a selected row drags the whole regular-row selection; dragging an
@@ -1906,6 +2017,7 @@ namespace FRGVersionControl.UI
                 now => ApplyRowCheck(r, isOverride, now, Event.current != null && Event.current.shift),
                 onFilenameClick: () =>
             {
+                SetDiffRow(r);
                 if (isConflict || isOverride)
                 {
                     ToggleConflictRowExpansion(r);
@@ -1952,6 +2064,12 @@ namespace FRGVersionControl.UI
             }
 
             EditorGUILayout.EndHorizontal();
+
+            if (Event.current.type == EventType.MouseDown && Event.current.button == 0
+                && rowRect.Contains(Event.current.mousePosition))
+            {
+                SetDiffRow(r);
+            }
 
             // Slice 1: right-click context menu on regular (non-override, non-conflict) rows.
             // Conflict and override rows already have purpose-built action buttons in the row;

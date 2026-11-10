@@ -39,6 +39,8 @@ namespace FRGVersionControl.Core.IpcClient
     public static class IpcOpPolicy
     {
         public const int ReadOnlyTimeoutMs = 5000;
+        public const int DiffWorkingTimeoutMs = 25000;
+        public const int DiffExportBaseTimeoutMs = 100000;
         public const int MutatingLivenessMs = 60000;
         public const int MainThreadWaitBudgetMs = 35000;
         public static readonly TimeSpan AbandonedNoLongerBlocksKillAfter = TimeSpan.FromMinutes(5);
@@ -54,6 +56,7 @@ namespace FRGVersionControl.Core.IpcClient
             "cl.membership", "cl.userListGet",
             "override.list",
             "shelf.list", "shelf.diff",
+            "diff.working", "diff.exportBase",
             "prop.list",
             "conflict.list",
             "auth.logins",
@@ -73,6 +76,18 @@ namespace FRGVersionControl.Core.IpcClient
             if (s_ReadOnly.Contains(op)) return IpcOpClass.ReadOnly;
             if (s_LongExclusive.Contains(op)) return IpcOpClass.LongExclusive;
             return IpcOpClass.Mutating;
+        }
+
+        /// <summary>The client timer for a read-only op. <c>diff.working</c> gets longer than its
+        /// 20 s core deadline (SVN_CORE_API.md §5.14) so a slow comparison ends with the core's own
+        /// answer instead of a pipe kill that would also cancel a status refresh.
+        /// <c>diff.exportBase</c> has no size limit: the core allows 30 s for the mutex plus 60 s for
+        /// <c>svn cat</c>.</summary>
+        public static int ReadOnlyTimeoutFor(string op)
+        {
+            if (op == "diff.working") return DiffWorkingTimeoutMs;
+            if (op == "diff.exportBase") return DiffExportBaseTimeoutMs;
+            return ReadOnlyTimeoutMs;
         }
 
         public static IpcRequestPlan Plan(IpcOpClass cls, bool exclusiveInFlight)

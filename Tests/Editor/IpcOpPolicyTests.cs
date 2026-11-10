@@ -15,6 +15,7 @@ namespace FRGVersionControl.Tests
             "meta.version", "meta.info", "status.query", "status.allEntries", "status.isVersioned",
             "hist.log", "hist.exportRevision", "hist.hashSha256", "hist.list", "cl.membership",
             "cl.userListGet", "override.list", "shelf.list", "shelf.diff", "prop.list", "conflict.list", "auth.logins", "ipc.cancel",
+            "diff.working", "diff.exportBase",
         };
 
         private static readonly string[] LongExclusiveOps =

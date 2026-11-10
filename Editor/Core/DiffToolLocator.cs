@@ -41,6 +41,37 @@ namespace FRGVersionControl.Core
             return found;
         }
 
+        public const string NoToolSentence =
+            "No compare tool found. Install TortoiseSVN (TortoiseMerge), Beyond Compare or KDiff3.";
+
+        /// <summary>Arguments that open <paramref name="leftPath"/> against <paramref name="rightPath"/>
+        /// in <paramref name="exe"/>. Only TortoiseMerge takes the labels.</summary>
+        public static string BuildArguments(string exe, string leftPath, string rightPath, string leftLabel, string rightLabel)
+            => IsTortoiseMerge(exe)
+                ? $"/base:\"{leftPath}\" /mine:\"{rightPath}\" /basename:\"{leftLabel}\" /minename:\"{rightLabel}\""
+                : $"\"{leftPath}\" \"{rightPath}\"";
+
+        /// <summary>Opens the two files in the first installed compare tool that starts. False
+        /// when none is installed or none could be started.</summary>
+        public static bool Launch(string leftPath, string rightPath, string leftLabel, string rightLabel)
+        {
+            foreach (var exe in Candidates())
+            {
+                try
+                {
+                    System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo
+                    {
+                        FileName = exe,
+                        Arguments = BuildArguments(exe, leftPath, rightPath, leftLabel, rightLabel),
+                        UseShellExecute = true,
+                    });
+                    return true;
+                }
+                catch { }
+            }
+            return false;
+        }
+
         public static bool IsTortoiseMerge(string exe)
             => string.Equals(Path.GetFileName(exe ?? ""), "TortoiseMerge.exe", StringComparison.OrdinalIgnoreCase);
 

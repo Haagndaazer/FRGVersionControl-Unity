@@ -264,6 +264,7 @@ namespace FRGVersionControl.Core.IpcClient
             var cls = IpcOpPolicy.Classify(op);
             var plan = IpcOpPolicy.Plan(cls, IsExclusiveOpInFlight);
             if (plan.SkipAsBusy) return BusyResult(op, sw.ElapsedMilliseconds);
+            if (cls == IpcOpClass.ReadOnly && plan.TimeoutMs.HasValue) plan.TimeoutMs = IpcOpPolicy.ReadOnlyTimeoutFor(op);
 
             var sent = await SendPersistentAsync(id, op, cls, requestJson, plan.TimeoutMs, waitBudgetMs, progress, ct).ConfigureAwait(false);
             string line = null;

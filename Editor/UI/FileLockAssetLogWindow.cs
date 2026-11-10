@@ -275,28 +275,8 @@ namespace FRGVersionControl.UI
         /// TortoiseSVN). Falls back to Beyond Compare, kdiff3, then a clear error message.</summary>
         private static void ShellOutDiff(string leftPath, string rightPath, string leftLabel, string rightLabel)
         {
-            foreach (var exe in FRGVersionControl.Core.DiffToolLocator.Candidates())
-            {
-                try
-                {
-                    var psi = new ProcessStartInfo
-                    {
-                        FileName = exe,
-                        Arguments = FRGVersionControl.Core.DiffToolLocator.IsTortoiseMerge(exe)
-                            ? $"/base:\"{leftPath}\" /mine:\"{rightPath}\" /basename:\"{leftLabel}\" /minename:\"{rightLabel}\""
-                            : $"\"{leftPath}\" \"{rightPath}\"",
-                        UseShellExecute = true
-                    };
-                    Process.Start(psi);
-                    return;
-                }
-                catch (Exception ex)
-                {
-                    Debug.LogWarning($"[FRGVersionControl.AssetLog] failed to spawn {exe}: {ex.Message}");
-                }
-            }
-            Debug.LogError("[FRGVersionControl.AssetLog] No diff tool found. " +
-                           "Install TortoiseMerge (bundled with TortoiseSVN) or Beyond Compare or kdiff3.");
+            if (FRGVersionControl.Core.DiffToolLocator.Launch(leftPath, rightPath, leftLabel, rightLabel)) return;
+            Debug.LogError("[FRGVersionControl.AssetLog] " + FRGVersionControl.Core.DiffToolLocator.NoToolSentence);
         }
 
         private void CancelAndStart()

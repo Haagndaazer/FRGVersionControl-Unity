@@ -50,6 +50,14 @@ namespace FRGVersionControl.Hooks
                 return paths; // User has disabled auto-lock; manual locking still available
             }
 
+            // Batch tools (test runners, asset processors, build pipelines) that bracket their
+            // work in FileLockSilenceService.RequestTemporaryDisable() suspend the whole pipeline,
+            // mirroring OnWillMoveAsset / OnPostprocessAllAssets — no auto-lock, no save dialogs.
+            if (FRGVersionControl.Services.FileLockSilenceService.IsTemporarilyDisabled)
+            {
+                return paths;
+            }
+
             // Categorize files first
             var filesToLock = new List<string>();
             var skippedFiles = new List<(string path, string reason)>();
@@ -85,6 +93,20 @@ namespace FRGVersionControl.Hooks
                 if (!IsLockableFile(lockabilityPath))
                 {
                     skippedFiles.Add((path, isMeta ? ".meta of non-lockable asset" : "Non-lockable file type"));
+                    continue;
+                }
+
+                // First save fires before Unity writes the file: no path on disk yet, so svn
+                // status has no entry, IsFileUncommitted reports "committed", and the locker hits
+                // E155010. A path not yet on disk has no committed base to lock — skip silently
+                // (the AssetPostprocessor auto-add path versions it after the write).
+                string fullPath = System.IO.Path.IsPathRooted(path)
+                    ? path
+                    : System.IO.Path.Combine(FRGVersionControl.Core.Svn.SvnCommandRunner.ProjectRoot, path);
+                if (!System.IO.File.Exists(fullPath))
+                {
+                    Debug.Log($"[FRGVersionControl] Skipping new file not yet on disk (auto-lock): {path}");
+                    skippedFiles.Add((path, "New file (not yet written)"));
                     continue;
                 }
 

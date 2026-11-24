@@ -302,6 +302,13 @@ namespace FRGVersionControl.Hooks
             // Add skipped files (meta, non-lockable, untracked)
             saveablePaths.AddRange(results.Where(r => r.status == FileOperationResult.Status.Skipped).Select(r => r.path));
 
+            // Silence (opt-in): a batch tool bracketing its run in RequestSilence() wants no
+            // on-save prompts. Locks are still attempted above; here we suppress every dialog,
+            // let the save proceed (never silently drop work — the commit-time needs-lock gate
+            // still protects the repo), and log what happened. No destructive SVN action is
+            // taken on the user's behalf (no override set, no force-unlock).
+            bool silenced = FRGVersionControl.Services.FileLockSilenceService.IsSilenced;
+
             // Handle locked-by-other files. The new dialog (OverrideOnSaveWindow) returns the
             // set of paths the user opted to set ignore-on-commit on; any path that SetIgnoreOnCommit
             // accepted joins the saveable list so the override-mode bypass at OnWillSaveAssets
@@ -309,24 +316,39 @@ namespace FRGVersionControl.Hooks
             // defensive dedup (case-insensitive — Windows path matching).
             if (lockedByOtherResults.Count > 0)
             {
-                var overriddenPaths = HandleLockedByOtherDialog(lockedByOtherResults, saveablePaths.Count);
-                saveablePaths = BuildSaveableListAfterOverride(saveablePaths, overriddenPaths);
+                if (silenced)
+                {
+                    foreach (var r in lockedByOtherResults)
+                        Debug.LogWarning($"[FRGVersionControl] Save of file locked by {r.existingLock?.ownerName ?? "another user"} not blocked (prompts silenced): {DisplayPath(r.path)}");
+                    saveablePaths.AddRange(lockedByOtherResults.Select(r => r.path));
+                }
+                else
+                {
+                    var overriddenPaths = HandleLockedByOtherDialog(lockedByOtherResults, saveablePaths.Count);
+                    saveablePaths = BuildSaveableListAfterOverride(saveablePaths, overriddenPaths);
+                }
             }
 
             // Handle failed locks (let user choose to save anyway or skip)
             if (failedResults.Count > 0)
             {
-                bool userChooseSaveAnyway = !HandleFailedLocksDialog(failedResults, saveablePaths.Count);
+                bool userChooseSaveAnyway = silenced || !HandleFailedLocksDialog(failedResults, saveablePaths.Count);
+                if (silenced)
+                {
+                    foreach (var r in failedResults)
+                        Debug.LogWarning($"[FRGVersionControl] Auto-lock failed, saving unlocked (prompts silenced): {DisplayPath(r.path)} - {r.errorMessage}");
+                }
                 if (userChooseSaveAnyway)
                 {
-                    // User chose "Save Anyway" - add failed files to saveable list
+                    // "Save Anyway" (or silenced) - add failed files to saveable list
                     saveablePaths.AddRange(failedResults.Select(r => r.path));
                 }
                 // Otherwise skip these files
             }
 
-            // Show success summary (only if there are successful locks and we saved something)
-            if (successResults.Count > 0 && saveablePaths.Count > 0)
+            // Show success summary (only if there are successful locks and we saved something).
+            // Suppressed when silenced — it is a dialog too.
+            if (!silenced && successResults.Count > 0 && saveablePaths.Count > 0)
             {
                 ShowSuccessSummary(successResults);
             }

@@ -43,6 +43,7 @@ namespace FRGVersionControl.Core.IpcClient
         private sealed class LogResult
         {
             public LogShim[] revisions;
+            public bool hasMore;
         }
 
         [Serializable]
@@ -52,6 +53,17 @@ namespace FRGVersionControl.Core.IpcClient
             public string author;
             public string date;
             public string message;
+            public PathShim[] paths;
+            public int pathCount;
+            public bool pathsTruncated;
+        }
+
+        [Serializable]
+        private sealed class PathShim
+        {
+            public string path;
+            public string action;
+            public string kind;
         }
 
         [Serializable]
@@ -135,23 +147,40 @@ namespace FRGVersionControl.Core.IpcClient
             return null;
         }
 
-        public static List<SvnLogEntry> ParseLogEntries(string rawJson)
+        public static List<SvnLogEntry> ParseLogEntries(string rawJson) => ParseLogPage(rawJson).entries;
+
+        /// <summary>Parses a <c>hist.log</c> reply into a page: the revisions (with their changed
+        /// <c>paths</c>, when the request included them) plus <c>hasMore</c> for "load older".</summary>
+        public static SvnLogPage ParseLogPage(string rawJson)
         {
-            var entries = new List<SvnLogEntry>();
+            var page = new SvnLogPage();
             var env = JsonUtility.FromJson<LogEnvelope>(rawJson ?? "");
-            if (env?.result?.revisions == null) return entries;
+            if (env?.result == null) return page;
+            page.hasMore = env.result.hasMore;
+            if (env.result.revisions == null) return page;
             foreach (var r in env.result.revisions)
             {
                 if (r == null) continue;
-                entries.Add(new SvnLogEntry
+                var entry = new SvnLogEntry
                 {
                     revision = (int)r.revision,
                     author = r.author ?? "",
                     date = r.date ?? "",
                     message = r.message ?? "",
-                });
+                    pathCount = r.pathCount,
+                    pathsTruncated = r.pathsTruncated,
+                };
+                if (r.paths != null)
+                {
+                    foreach (var p in r.paths)
+                    {
+                        if (p == null || string.IsNullOrEmpty(p.path)) continue;
+                        entry.paths.Add(new SvnLogPath { path = p.path, action = p.action ?? "", kind = p.kind ?? "" });
+                    }
+                }
+                page.entries.Add(entry);
             }
-            return entries;
+            return page;
         }
 
         public static List<string> ParseNamesArray(string rawJson)

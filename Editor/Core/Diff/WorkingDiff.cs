@@ -175,6 +175,37 @@ namespace FRGVersionControl.Core.Diff
             });
         }
 
+        /// <summary>Compares <paramref name="path"/> against a historical revision (SVN_CORE_API.md
+        /// §5.14 leftRevision/rightRevision). <paramref name="leftRevision"/> omitted = committed
+        /// base; <paramref name="rightRevision"/> omitted = the working file. This path contacts the
+        /// server, unlike the local base-vs-working form.</summary>
+        public static Task<WorkingDiff> FetchAsync(string path, int? leftRevision, int? rightRevision)
+        {
+            return Task.Run(() =>
+            {
+                try
+                {
+                    var client = FileLockManager.Instance.IpcClient;
+                    if (client == null || !client.IsAvailable)
+                    {
+                        return Failed(path, "svn-core is not available. Reinstall the FRG Version Control package.");
+                    }
+                    var args = "{\"path\":\"" + SvnCommandRunner.IpcEscape(path) + "\"";
+                    if (leftRevision.HasValue) args += ",\"leftRevision\":" + leftRevision.Value;
+                    if (rightRevision.HasValue) args += ",\"rightRevision\":" + rightRevision.Value;
+                    args += "}";
+                    var result = client.InvokeRawAsync("diff.working", args, client.BuildDefaultContext()).GetAwaiter().GetResult();
+                    if (result.Busy || result.StillRunning || IsBusyKind(result)) return new WorkingDiff { path = path, busy = true };
+                    if (!result.Ok) return Failed(path, ErrorSentence(result, "Could not compare these revisions"));
+                    return WorkingDiffParser.Parse(result.RawLine, path);
+                }
+                catch (Exception ex)
+                {
+                    return Failed(path, "Could not compare these revisions (" + ex.Message + "). Try again.");
+                }
+            });
+        }
+
         /// <summary>Writes the committed base of <paramref name="path"/> to a temp file. Returns
         /// the temp path, or null with <paramref name="error"/> text in the tuple.</summary>
         public static Task<(string tempPath, string error)> ExportBaseAsync(string path)

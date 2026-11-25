@@ -54,6 +54,30 @@ namespace FRGVersionControl.Core.Svn
             }
         }
 
+        /// <summary>Maps a <c>hist.log</c> changed-path (a repository path like
+        /// <c>/trunk/Assets/Foo.prefab</c>, repo-root-relative) to a path relative to the Unity
+        /// project folder — what <c>diff.working</c> and the asset APIs expect — or null when the
+        /// file is outside the project folder or <c>meta.layout</c> hasn't answered yet. Prefix match
+        /// on the URL, so a path with percent-encoded characters (spaces etc.) may not map; the
+        /// caller then shows the row without an in-pane open. Returns "" for the project folder itself.</summary>
+        public static string RepoPathToProjectRelative(string repoPath)
+        {
+            if (string.IsNullOrEmpty(repoPath)) return null;
+            var info = s_Info;
+            if (info == null || string.IsNullOrEmpty(info.repoRoot) || string.IsNullOrEmpty(info.projectUrl)) return null;
+            if (!info.projectUrl.StartsWith(info.repoRoot, StringComparison.Ordinal)) return null;
+            // The project folder's location under the repo root, e.g. "/trunk" or "/trunk/MyProject".
+            string projectUnderRepo = info.projectUrl.Substring(info.repoRoot.Length);
+            if (!projectUnderRepo.StartsWith("/")) projectUnderRepo = "/" + projectUnderRepo;
+            projectUnderRepo = projectUnderRepo.TrimEnd('/');
+            string rp = repoPath.StartsWith("/") ? repoPath : "/" + repoPath;
+            if (projectUnderRepo.Length == 0) return rp.TrimStart('/'); // project folder is the repo root
+            if (string.Equals(rp, projectUnderRepo, StringComparison.Ordinal)) return "";
+            if (rp.StartsWith(projectUnderRepo + "/", StringComparison.Ordinal))
+                return rp.Substring(projectUnderRepo.Length + 1);
+            return null; // outside the project folder
+        }
+
         [InitializeOnLoadMethod]
         private static void StartAfterLoad() => EditorApplication.delayCall += () => EnsureFetched();
 

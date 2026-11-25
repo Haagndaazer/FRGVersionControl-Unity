@@ -937,24 +937,53 @@ namespace FRGVersionControl.Core.Svn
         // History
         // ====================================================================
 
-        public static List<SvnLogEntry> FetchLog(string path, int upperRev, int limit)
+        /// <summary>hist.log for <paramref name="path"/> (null = project-wide). <paramref name="startRevision"/>
+        /// is the inclusive newest cursor (0 = from HEAD; "load older" passes oldestShown-1);
+        /// <paramref name="endRevision"/> &gt; 0 does a single-commit <c>-r N:N</c> fetch (must equal
+        /// startRevision). <paramref name="includePaths"/> gates the changed-file list;
+        /// <paramref name="pathLimit"/> caps it per revision. Returns the page plus hasMore.</summary>
+        public static SvnLogPage FetchLogPage(string path, int startRevision, int endRevision, int limit,
+                                              bool includePaths, int pathLimit)
         {
             try
             {
                 var client = FRGVersionControl.Core.FileLockManager.Instance.IpcClient;
-                if (!client.IsAvailable) return new List<SvnLogEntry>();
+                if (!client.IsAvailable)
+                    return new SvnLogPage { error = "svn-core is not available. Reinstall the FRG Version Control package." };
                 var ctx = client.BuildDefaultContext();
-                var args = $"{{\"path\":\"{IpcEscape(path)}\",\"limit\":{limit}}}";
+                var args = "{";
+                if (!string.IsNullOrEmpty(path)) args += $"\"path\":\"{IpcEscape(path)}\",";
+                args += $"\"limit\":{limit}";
+                if (startRevision > 0) args += $",\"startRevision\":{startRevision}";
+                if (endRevision > 0) args += $",\"endRevision\":{endRevision}";
+                if (!includePaths) args += ",\"includePaths\":false";
+                if (pathLimit > 0) args += $",\"pathLimit\":{pathLimit}";
+                args += "}";
                 var result = client.InvokeRawAsync("hist.log", args, ctx).GetAwaiter().GetResult();
-                if (!result.Ok) return new List<SvnLogEntry>();
-                return FRGVersionControl.Core.IpcClient.IpcResponseParsers.ParseLogEntries(result.RawLine);
+                if (result.Busy || result.StillRunning) return new SvnLogPage { busy = true };
+                if (!result.Ok)
+                {
+                    string action = !string.IsNullOrEmpty(result.ErrorDefaultAction) ? result.ErrorDefaultAction : "Refresh, then try again.";
+                    string kind = string.IsNullOrEmpty(result.ErrorKind) ? "" : $" ({result.ErrorKind})";
+                    return new SvnLogPage { error = $"Could not load history{kind}. {action}" };
+                }
+                return FRGVersionControl.Core.IpcClient.IpcResponseParsers.ParseLogPage(result.RawLine);
             }
             catch (Exception ex)
             {
                 Debug.LogWarning($"[SvnCommandRunner] IPC hist.log failed: {ex.Message}");
-                return new List<SvnLogEntry>();
+                return new SvnLogPage { error = $"Could not load history ({ex.Message}). Try again." };
             }
         }
+
+        public static Task<SvnLogPage> FetchLogPageAsync(string path, int startRevision, int endRevision, int limit,
+                                                         bool includePaths, int pathLimit, CancellationToken ct = default)
+            => Task.Run(() => { ct.ThrowIfCancellationRequested(); return FetchLogPage(path, startRevision, endRevision, limit, includePaths, pathLimit); }, ct);
+
+        // Back-compat for the per-asset log window. `upperRev` (oldestShown-1, or <=0 for the newest
+        // page) now maps to startRevision — previously it was ignored, so "load older" never paged.
+        public static List<SvnLogEntry> FetchLog(string path, int upperRev, int limit)
+            => FetchLogPage(path, upperRev > 0 ? upperRev : 0, 0, limit, includePaths: true, pathLimit: 0).entries;
 
         public static Task<List<SvnLogEntry>> FetchLogAsync(string path, int upperRev, int limit,
                                                              CancellationToken ct = default)
@@ -1512,5 +1541,30 @@ namespace FRGVersionControl.Core.Svn
         public string author;
         public string date;
         public string message;
+        // Changed files in this revision (hist.log -v). Empty when the entry was fetched without
+        // paths (includePaths:false — the lazy list view). Repository paths (e.g. /trunk/Assets/x).
+        public System.Collections.Generic.List<SvnLogPath> paths = new System.Collections.Generic.List<SvnLogPath>();
+        // Total changed-path count when the core capped paths[] (pathLimit); 0 when not truncated.
+        public int pathCount;
+        public bool pathsTruncated;
+    }
+
+    public class SvnLogPath
+    {
+        public string path;    // repository path, e.g. /trunk/Assets/Foo.prefab
+        public string action;  // A (add) / M (modify) / D (delete) / R (replace)
+        public string kind;    // "file" or "dir"
+    }
+
+    /// <summary>A page of <see cref="SvnLogEntry"/> plus whether an older page exists (hist.log hasMore).
+    /// <see cref="busy"/> means another svn op was running (try again shortly); <see cref="error"/> is a
+    /// user-facing failure sentence (null on success). An empty <see cref="entries"/> with neither set
+    /// is a genuine "no history".</summary>
+    public class SvnLogPage
+    {
+        public System.Collections.Generic.List<SvnLogEntry> entries = new System.Collections.Generic.List<SvnLogEntry>();
+        public bool hasMore;
+        public bool busy;
+        public string error;
     }
 }

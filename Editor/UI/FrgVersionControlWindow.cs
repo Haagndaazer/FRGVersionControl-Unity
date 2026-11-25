@@ -93,7 +93,7 @@ namespace FRGVersionControl.UI
         }
 
         // ----- Tab state (EditorPrefs across-session) -----
-        private enum Tab { Changes = 0, Locks = 1 }
+        private enum Tab { Changes = 0, Locks = 1, History = 2 }
         private const string TAB_PREFS_KEY = "FrgVersionControl.ActiveTab";
         private Tab m_ActiveTab;
 
@@ -190,6 +190,7 @@ namespace FRGVersionControl.UI
         private static readonly int s_DiffSplitterHash = "FrgDiffSplitter".GetHashCode();
 
         private DiffPane m_DiffPane;
+        private HistoryTabView m_HistoryView;
         private string m_DiffPath;
         private bool m_ShowDiffPane;
         private float m_DiffPaneHeight;
@@ -256,6 +257,7 @@ namespace FRGVersionControl.UI
             m_ShowDiffPane = ProjectPrefs.GetBool(DIFF_SHOW_PREFS_KEY, true);
             m_DiffPaneHeight = ProjectPrefs.GetInt(DIFF_HEIGHT_PREFS_KEY, 220);
             m_DiffPane = new DiffPane(Repaint);
+            m_HistoryView = new HistoryTabView(m_DiffPane, Repaint);
             m_DiffPath = null;
             SvnStatusCache.SnapshotUpdated += OnSnapshotUpdated;
             EnsureConflictIconLoaded();
@@ -274,6 +276,7 @@ namespace FRGVersionControl.UI
         {
             SvnStatusCache.SnapshotUpdated -= OnSnapshotUpdated;
             m_DiffPane?.Dispose();
+            m_HistoryView?.Dispose();
             // Phase 4 polish: destroy any lingering preview textures (Unity does NOT garbage-collect
             // Texture2D objects created via LoadImage — they leak unless DestroyImmediate'd).
             foreach (var r in m_Rows)
@@ -647,7 +650,7 @@ namespace FRGVersionControl.UI
         private void OnGUI()
         {
             // Tab toolbar at top
-            int newTab = GUILayout.Toolbar((int)m_ActiveTab, new[] { "Changes", "Locks" });
+            int newTab = GUILayout.Toolbar((int)m_ActiveTab, new[] { "Changes", "Locks", "History" });
             if (newTab != (int)m_ActiveTab)
             {
                 m_ActiveTab = (Tab)newTab;
@@ -656,12 +659,21 @@ namespace FRGVersionControl.UI
                 m_ChangeRange.Clear();
                 m_OverrideRange.Clear();
                 m_LockRange.Clear();
+                m_DiffPane?.Clear(); // the preview is shared across tabs; don't carry one tab's diff into another
+                m_DiffPath = null;   // so a Changes-tab snapshot refresh can't re-Show over a History diff
             }
 
             if (m_ActiveTab == Tab.Changes) DrawChangesTab();
-            else                            DrawLocksTab();
+            else if (m_ActiveTab == Tab.Locks) DrawLocksTab();
+            else DrawHistoryTab();
 
             DrawCacheStatusBar(); // footer — visible on all tabs
+        }
+
+        private void DrawHistoryTab()
+        {
+            m_HistoryView.DrawList();
+            DrawDiffPane(); // the preview is the point of this tab, so it's always shown here
         }
 
         private void DrawChangesTab()
@@ -1204,6 +1216,7 @@ namespace FRGVersionControl.UI
         /// when its row is gone (committed, reverted).</summary>
         private void SyncDiffPane()
         {
+            if (m_ActiveTab != Tab.Changes) return; // the History tab owns the shared pane while it's active
             if (m_DiffPane == null || m_DiffPath == null) return;
             Row row = null;
             foreach (var r in m_Rows)

@@ -49,6 +49,12 @@ namespace FRGVersionControl.UI
         private bool m_Exporting;
         private bool m_Disposed;
 
+        // Historical-revision comparison (null = the default committed-base vs working-file view).
+        private int? m_LeftRevision;
+        private int? m_RightRevision;
+        private int? m_PendingLeft;
+        private int? m_PendingRight;
+
         private float m_ScrollY;
         private float m_ScrollX;
         private float m_ContentWidth;
@@ -71,11 +77,37 @@ namespace FRGVersionControl.UI
                 Clear();
                 return;
             }
-            string signature = Signature(path, statusKey);
-            bool samePath = m_Path != null && PathKey.Same(m_Path, path);
-            if (samePath && signature == m_Signature && (m_Diff == null || !m_Diff.busy || m_PendingPath != null)) return;
+            ShowInternal(path, Signature(path, statusKey), null, null);
+        }
 
-            if (!samePath)
+        /// <summary>Shows a comparison against a historical revision (SVN_CORE_API.md §5.14):
+        /// <paramref name="leftRevision"/> omitted = committed base, <paramref name="rightRevision"/>
+        /// omitted = the working file. Used by the History views to open "what changed in commit N".</summary>
+        public void ShowRevisions(string path, int? leftRevision, int? rightRevision)
+        {
+            if (string.IsNullOrEmpty(path))
+            {
+                Clear();
+                return;
+            }
+            // Revisions define the content, so the cache key is the revision pair (not file mtime) —
+            // otherwise clicking two revisions of the same file in a row would show a stale diff.
+            string signature = "rev|" + (leftRevision?.ToString() ?? "base") + ":" + (rightRevision?.ToString() ?? "work");
+            ShowInternal(path, signature, leftRevision, rightRevision);
+        }
+
+        private void ShowInternal(string path, string signature, int? left, int? right)
+        {
+            bool samePath = m_Path != null && PathKey.Same(m_Path, path);
+            // Re-run only when something changed: a new file/signature, a busy result to retry, or an
+            // errored result the user is re-clicking to retry. A settled success is left alone.
+            if (samePath && signature == m_Signature
+                && (m_Diff == null || (!m_Diff.busy && m_Diff.error == null) || m_PendingPath != null)) return;
+
+            // Reset the view only when the file or the revision pair changes — NOT on a mere
+            // size/mtime signature bump of the same local file (that would blank the diff and lose
+            // scroll every time the previewed file is saved).
+            if (!samePath || left != m_LeftRevision || right != m_RightRevision)
             {
                 m_Diff = null;
                 m_Notice = null;
@@ -85,8 +117,12 @@ namespace FRGVersionControl.UI
             m_Path = path;
             m_Signature = signature;
             m_Loading = true;
+            m_LeftRevision = left;
+            m_RightRevision = right;
             m_PendingPath = path;
             m_PendingSignature = signature;
+            m_PendingLeft = left;
+            m_PendingRight = right;
             m_PendingAt = EditorApplication.timeSinceStartup + RequestDelaySeconds;
             StartPump();
             m_Repaint?.Invoke();
@@ -100,6 +136,10 @@ namespace FRGVersionControl.UI
             m_Loading = false;
             m_Notice = null;
             m_PendingPath = null;
+            m_LeftRevision = null;
+            m_RightRevision = null;
+            m_PendingLeft = null;
+            m_PendingRight = null;
         }
 
         public void Dispose()
@@ -153,9 +193,14 @@ namespace FRGVersionControl.UI
 
             string path = m_PendingPath;
             string signature = m_PendingSignature;
+            int? left = m_PendingLeft;
+            int? right = m_PendingRight;
             m_PendingPath = null;
             m_InFlight = true;
-            WorkingDiffService.FetchAsync(path).ContinueWith(task =>
+            var fetch = (left.HasValue || right.HasValue)
+                ? WorkingDiffService.FetchAsync(path, left, right)
+                : WorkingDiffService.FetchAsync(path);
+            fetch.ContinueWith(task =>
             {
                 WorkingDiff diff = task.IsFaulted || task.IsCanceled
                     ? new WorkingDiff { path = path, error = "Could not compare this file. Click the file again to retry." }
@@ -265,7 +310,8 @@ namespace FRGVersionControl.UI
             GUI.Label(labelRect, HeaderText(), EditorStyles.miniBoldLabel);
 
             bool canExternal = m_Path != null && !m_Exporting && m_Diff != null && m_Diff.error == null && !m_Diff.busy
-                               && m_Diff.hasBase && m_Diff.hasWorking && m_Diff.state != "unsupported";
+                               && m_Diff.hasBase && m_Diff.hasWorking && m_Diff.state != "unsupported"
+                               && !m_LeftRevision.HasValue && !m_RightRevision.HasValue;
             using (new EditorGUI.DisabledScope(!canExternal))
             {
                 var buttonRect = new Rect(rect.xMax - buttonWidth - 4, rect.y + 1, buttonWidth, rect.height - 3);
@@ -283,6 +329,15 @@ namespace FRGVersionControl.UI
             if (m_Path == null) return "Changes preview";
             string name = System.IO.Path.GetFileName(m_Path);
             if (m_Diff == null || m_Diff.error != null || m_Diff.busy) return name;
+            if (m_LeftRevision.HasValue || m_RightRevision.HasValue)
+            {
+                string l = m_LeftRevision.HasValue
+                    ? (m_LeftRevision.Value == 0 ? "before r1" : "r" + m_LeftRevision.Value)
+                    : (!m_Diff.hasBase ? "new file" : "committed");
+                string r = m_RightRevision.HasValue ? "r" + m_RightRevision.Value : "your file";
+                string c = m_Diff.state == "text" ? "    +" + m_Diff.added + "  −" + m_Diff.removed : "";
+                return name + "    " + l + "  ↔  " + r + c;
+            }
             string left = !m_Diff.hasBase ? "new file"
                 : m_Diff.baseRevision > 0 ? "r" + m_Diff.baseRevision : "committed";
             if (m_Diff.movedFrom != null) left += " (moved from " + System.IO.Path.GetFileName(m_Diff.movedFrom.Replace('\\', '/')) + ")";

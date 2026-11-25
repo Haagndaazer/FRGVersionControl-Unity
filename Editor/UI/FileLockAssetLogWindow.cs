@@ -28,7 +28,7 @@ namespace FRGVersionControl.UI
     {
         private const int PAGE_SIZE = 50;
 
-        [MenuItem("Assets/FRG Version Control/Show Log", false, 2006)]
+        [MenuItem("Assets/FRG Version Control/Show History", false, 2006)]
         private static void ShowLogForSelection()
         {
             var path = AssetDatabase.GetAssetPath(Selection.activeObject);
@@ -36,7 +36,7 @@ namespace FRGVersionControl.UI
             Open(path);
         }
 
-        [MenuItem("Assets/FRG Version Control/Show Log", true)]
+        [MenuItem("Assets/FRG Version Control/Show History", true)]
         private static bool ShowLogForSelection_Validate()
         {
             return Selection.activeObject != null
@@ -45,7 +45,7 @@ namespace FRGVersionControl.UI
 
         public static void Open(string assetPath)
         {
-            var window = GetWindow<FileLockAssetLogWindow>(true, $"Log: {Path.GetFileName(assetPath)}");
+            var window = GetWindow<FileLockAssetLogWindow>(true, $"History: {Path.GetFileName(assetPath)}");
             window.minSize = new Vector2(560, 360);
             window.SetTarget(assetPath);
             window.Show();

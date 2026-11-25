@@ -211,9 +211,10 @@ namespace FRGVersionControl.Core
             if (!client.IsAvailable) return null;
             var r = await client.TryGetAllStatusEntriesAsync(ct).ConfigureAwait(false);
             if (r.Ok) return r.Value;
-            Debug.LogWarning(r.Busy
-                ? $"[SvnStatusCache] refresh skipped (prior snapshot retained): {r.Error}"
-                : $"[SvnStatusCache] IPC status failed (prior snapshot retained): {r.Error}");
+            if (r.Busy)
+                Debug.Log($"[SvnStatusCache] refresh skipped — an SVN operation is in progress (prior snapshot retained): {r.Error}");
+            else
+                Debug.LogWarning($"[SvnStatusCache] IPC status failed (prior snapshot retained): {r.Error}");
             return null;
         }
 

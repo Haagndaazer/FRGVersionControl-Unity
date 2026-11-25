@@ -33,6 +33,7 @@ namespace FRGVersionControl.Core.Changelists
         private static List<string> s_Cache;
         private static DateTime s_CachedAt = DateTime.MinValue;
         private static DateTime s_LastWarn = DateTime.MinValue;
+        private static DateTime s_LastBusyLog = DateTime.MinValue;
 
         /// <summary>The declared names. Re-read from svn-core at most every few seconds; when the
         /// read fails (svn-core busy or unavailable) the last good list is returned.</summary>
@@ -47,6 +48,7 @@ namespace FRGVersionControl.Core.Changelists
             }
 
             string error = null;
+            bool busy = false;
             List<string> names = null;
             try
             {
@@ -55,7 +57,7 @@ namespace FRGVersionControl.Core.Changelists
                 {
                     var result = client.InvokeRawAsync("cl.userListGet", "{}", client.BuildDefaultContext()).GetAwaiter().GetResult();
                     if (result.Ok) names = IpcClient.IpcResponseParsers.ParseNamesArray(result.RawLine);
-                    else error = result.ErrorMessage;
+                    else { error = result.ErrorMessage; busy = result.Busy; }
                 }
                 else
                 {
@@ -76,7 +78,15 @@ namespace FRGVersionControl.Core.Changelists
                     return new List<string>(names);
                 }
                 s_CachedAt = DateTime.UtcNow - TimeSpan.FromSeconds(RefreshAfterSeconds - FailedRetrySeconds);
-                if ((DateTime.UtcNow - s_LastWarn).TotalSeconds >= WarnEverySeconds)
+                if (busy)
+                {
+                    if ((DateTime.UtcNow - s_LastBusyLog).TotalSeconds >= WarnEverySeconds)
+                    {
+                        s_LastBusyLog = DateTime.UtcNow;
+                        Debug.Log($"[FRGVersionControl] Changelist names not re-read — an SVN operation is in progress ({error}); showing the last known list.");
+                    }
+                }
+                else if ((DateTime.UtcNow - s_LastWarn).TotalSeconds >= WarnEverySeconds)
                 {
                     s_LastWarn = DateTime.UtcNow;
                     Debug.LogWarning($"[FRGVersionControl] Could not read the changelist names ({error}); showing the last known list.");

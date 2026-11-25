@@ -45,11 +45,15 @@ namespace FRGVersionControl.Services
         {
             Debug.Log("[FRGVersionControl] Background sync: Refreshing lock cache + status cache...");
 
-            bool success = FileLockManager.Instance.RefreshLockCache();
+            bool success = FileLockManager.Instance.RefreshLockCache(out bool skippedBusy);
 
             if (success)
             {
                 Debug.Log("[FRGVersionControl] Background sync: Complete");
+            }
+            else if (skippedBusy)
+            {
+                Debug.Log("[FRGVersionControl] Background sync: skipped — an SVN operation (e.g. commit) is in progress; prior cache kept");
             }
             else
             {

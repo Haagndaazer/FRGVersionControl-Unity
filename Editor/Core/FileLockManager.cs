@@ -462,13 +462,19 @@ namespace FRGVersionControl.Core
         /// 5-minute timer). The blocking semantics match the legacy path's
         /// Process.Start + WaitForExit pattern.
         /// </summary>
-        public bool RefreshLockCache()
+        public bool RefreshLockCache() => RefreshLockCache(out _);
+
+        /// <summary><paramref name="skippedBusy"/> is set when the refresh was skipped because a
+        /// long-exclusive op (commit/update/cleanup) is in progress — a benign transient state,
+        /// not a failure. Callers use it to avoid surfacing a scary "sync failed" warning.</summary>
+        public bool RefreshLockCache(out bool skippedBusy)
         {
+            skippedBusy = false;
             if (!m_Initialized) return false;
 
             try
             {
-                var svnLockMap = TryRefreshViaIpc();
+                var svnLockMap = TryRefreshViaIpc(out skippedBusy);
                 if (svnLockMap == null) return false;
                 IpcClient.ClearLoginRejected();
                 m_CachedLocks = FileLocks.FromSvnLockInfoMap(svnLockMap, LockOwnerIdentifier);
@@ -490,8 +496,9 @@ namespace FRGVersionControl.Core
             }
         }
 
-        private Dictionary<string, SvnLockInfo> TryRefreshViaIpc()
+        private Dictionary<string, SvnLockInfo> TryRefreshViaIpc(out bool busy)
         {
+            busy = false;
             try
             {
                 var client = IpcClient;
@@ -501,9 +508,11 @@ namespace FRGVersionControl.Core
                 // sync context. Same blocking profile as the legacy CLI invocation.
                 var r = client.TryGetLockMapAsync().GetAwaiter().GetResult();
                 if (r.Ok) return r.Value;
-                Debug.LogWarning(r.Busy
-                    ? $"[FRGVersionControl] Lock refresh skipped (prior cache kept): {r.Error}"
-                    : $"[FRGVersionControl] Lock refresh failed (prior cache kept): {r.Error}");
+                busy = r.Busy;
+                if (r.Busy)
+                    Debug.Log($"[FRGVersionControl] Lock refresh skipped — an SVN operation is in progress (prior cache kept): {r.Error}");
+                else
+                    Debug.LogWarning($"[FRGVersionControl] Lock refresh failed (prior cache kept): {r.Error}");
                 return null;
             }
             catch (Exception ex)

@@ -45,6 +45,11 @@ namespace FRGVersionControl.UI
         private bool m_PendingRefresh;
         private bool m_Restoring;
 
+        // Restore-selection: repo path -> the revision to restore it to. Keyed by path only (a file
+        // can be restored to exactly one revision), so checking the same file under a different
+        // commit moves the selection rather than queuing a second, conflicting restore.
+        private readonly Dictionary<string, int> m_SelectedForRestore = new Dictionary<string, int>(StringComparer.Ordinal);
+
         public HistoryTabView(DiffPane diffPane, Action repaint)
         {
             m_DiffPane = diffPane;
@@ -79,6 +84,7 @@ namespace FRGVersionControl.UI
             m_Notice = null;
             m_SelectedRev = -1;
             m_SelectedRepoPath = null;
+            m_SelectedForRestore.Clear();
             LoadPage(0);
         }
 
@@ -179,7 +185,9 @@ namespace FRGVersionControl.UI
         public void DrawList()
         {
             EnsureStarted();
-            if (m_PendingRefresh) { m_PendingRefresh = false; RefreshNow(); }
+            // Defer a requested refresh while a restore batch is running: RefreshNow() clears the
+            // selection and notice the batch is still writing to.
+            if (m_PendingRefresh && !m_Restoring) { m_PendingRefresh = false; RefreshNow(); }
 
             EditorGUILayout.BeginHorizontal(EditorStyles.toolbar);
             GUILayout.Label(m_Entries.Count > 0 ? $"{m_Entries.Count} commit(s)" : (m_Loading ? "Loading…" : "History"),
@@ -211,6 +219,7 @@ namespace FRGVersionControl.UI
             }
             EditorGUILayout.EndScrollView();
 
+            EditorGUILayout.BeginHorizontal();
             using (new EditorGUI.DisabledScope(m_Loading || !m_HasMore || m_LowestRev <= 1))
             {
                 if (GUILayout.Button(new GUIContent("Load older", "Fetch the next page of older commits"), GUILayout.Width(110)))
@@ -219,6 +228,18 @@ namespace FRGVersionControl.UI
                     if (next > 0) LoadPage(next);
                 }
             }
+            GUILayout.FlexibleSpace();
+            int selCount = m_SelectedForRestore.Count;
+            using (new EditorGUI.DisabledScope(selCount == 0 || m_Restoring))
+            {
+                if (GUILayout.Button(new GUIContent($"Restore Selected ({selCount})",
+                        "Replace each checked file in your working copy with its version from the commit it's listed under"),
+                        GUILayout.Width(160)))
+                {
+                    BeginRestoreSelected();
+                }
+            }
+            EditorGUILayout.EndHorizontal();
         }
 
         private void DrawCommitRow(SvnLogEntry e)
@@ -272,126 +293,78 @@ namespace FRGVersionControl.UI
                 EditorGUI.DrawRect(rect, new Color(0.3f, 0.5f, 0.8f, 0.25f));
             }
             GUILayout.Space(EditorGUI.indentLevel * 8f);
+            // A folder, or a file deleted in this revision, can't be restored to it — no checkbox,
+            // but a matching-width spacer so the glyph/name columns stay aligned with file rows.
+            bool eligible = !string.Equals(p.kind, "dir", StringComparison.Ordinal)
+                            && !string.Equals(p.action, "D", StringComparison.Ordinal);
+            if (eligible)
+            {
+                bool wasSel = m_SelectedForRestore.TryGetValue(p.path, out var selRev) && selRev == revision;
+                bool nowSel = GUILayout.Toggle(wasSel, GUIContent.none, GUILayout.Width(16));
+                if (nowSel != wasSel)
+                {
+                    if (nowSel) m_SelectedForRestore[p.path] = revision;   // moves the check if it was under another commit
+                    else m_SelectedForRestore.Remove(p.path);
+                }
+            }
+            else
+            {
+                GUILayout.Space(16f);
+            }
             GUILayout.Label(ActionGlyph(p.action), GUILayout.Width(18));
             if (string.Equals(p.kind, "dir", StringComparison.Ordinal))
             {
                 GUILayout.Label(DisplayRepoPath(p.path) + "  (folder)", EditorStyles.miniLabel);
             }
-            else
+            else if (GUILayout.Button(DisplayRepoPath(p.path), EditorStyles.label, GUILayout.ExpandWidth(true), GUILayout.MinWidth(0)))
             {
-                // Label expands+shrinks so the fixed Restore button always keeps its right-edge slot
-                // even on a long path (ExpandWidth(false) would push it off-screen).
-                if (GUILayout.Button(DisplayRepoPath(p.path), EditorStyles.label, GUILayout.ExpandWidth(true), GUILayout.MinWidth(0)))
-                {
-                    SelectFile(revision, p);
-                }
-                // A file deleted in this revision doesn't exist at it, so there's nothing to restore to.
-                if (!string.Equals(p.action, "D", StringComparison.Ordinal))
-                {
-                    using (new EditorGUI.DisabledScope(m_Restoring))
-                    {
-                        if (GUILayout.Button(new GUIContent("Restore", $"Replace this file in your working copy with its r{revision} version"),
-                                EditorStyles.miniButton, GUILayout.Width(64)))
-                        {
-                            BeginRestore(revision, p);
-                        }
-                    }
-                }
+                SelectFile(revision, p);
             }
             EditorGUILayout.EndHorizontal();
         }
 
-        // ----- restore to a revision (mutate.restoreRevision) -----
+        // ----- restore selected files to their revisions (mutate.restoreRevision via RestoreFlow) -----
 
-        // Click handler: defer the confirm dialog out of the OnGUI/layout pass (a modal shown mid-layout
-        // can desync IMGUI control counts), and guard against overlapping restores.
-        private void BeginRestore(int revision, SvnLogPath p)
+        // Defer the confirm dialog + batch out of the OnGUI/layout pass (a modal shown mid-layout can
+        // desync IMGUI control counts) and guard against overlapping restores. The selection is
+        // snapshotted at click time so a background refresh of the live set can't desync the loop.
+        private void BeginRestoreSelected()
         {
-            if (m_Restoring) return;
+            if (m_Restoring || m_SelectedForRestore.Count == 0) return;
             m_Restoring = true;
-            int rev = revision;
-            SvnLogPath row = p;
-            EditorApplication.delayCall += () => RequestRestoreFromRow(rev, row);
+            var snapshot = new List<KeyValuePair<string, int>>(m_SelectedForRestore);
+            EditorApplication.delayCall += () => LaunchRestore(snapshot);
         }
 
-        private void RequestRestoreFromRow(int revision, SvnLogPath p)
+        private void LaunchRestore(List<KeyValuePair<string, int>> snapshot)
         {
             WorkingCopyLayout.EnsureFetched();
-            string projectRel = WorkingCopyLayout.RepoPathToProjectRelative(p.path);
-            if (string.IsNullOrEmpty(projectRel))
+            bool layoutReady = WorkingCopyLayout.Current != null;
+            var items = new List<RestoreFlow.Item>();
+            var skipped = new List<RestoreFlow.Skip>();
+            foreach (var kv in snapshot)
             {
-                m_Notice = "This file is outside the Unity project folder (or the working-copy layout is still loading), so it can't be restored here.";
-                m_Restoring = false;
-                m_Repaint?.Invoke();
-                return;
-            }
-            string fileLabel = System.IO.Path.GetFileName(projectRel);
-            if (!EditorUtility.DisplayDialog("Restore file",
-                    $"Restore {fileLabel} to r{revision}?\n\nThis replaces the file in your working copy with its content from r{revision}. You can review and then commit the change to keep it.",
-                    "Restore", "Cancel"))
-            {
-                m_Restoring = false;
-                return;
-            }
-            DoRestore(revision, projectRel, fileLabel, overwrite: false);
-        }
-
-        private void DoRestore(int revision, string projectRel, string fileLabel, bool overwrite)
-        {
-            m_Restoring = true;
-            m_Notice = $"Restoring {fileLabel} to r{revision}…";
-            m_Repaint?.Invoke();
-            _ = SvnCommandRunner.RestoreRevisionAsync(projectRel, revision, overwrite)
-                .ContinueWith(task =>
+                string projectRel = WorkingCopyLayout.RepoPathToProjectRelative(kv.Key);
+                if (string.IsNullOrEmpty(projectRel))
                 {
-                    SvnRestoreResult res = task.IsFaulted || task.IsCanceled ? null : task.Result;
-                    SvnCommandRunner.s_UnityMainSync.Post(_ => HandleRestoreResult(res, revision, projectRel, fileLabel), null);
+                    // Full repo path as the label — bare file names don't disambiguate same-named files.
+                    skipped.Add(new RestoreFlow.Skip(kv.Key,
+                        layoutReady ? "outside the Unity project folder" : "working-copy layout still loading — try again"));
+                    continue;
+                }
+                items.Add(new RestoreFlow.Item(kv.Key, projectRel, kv.Value, projectRel));
+            }
+            items.Sort((a, b) => string.CompareOrdinal(a.Label, b.Label)); // deterministic confirm/summary order
+
+            RestoreFlow.Run(items, skipped,
+                notice => { m_Notice = notice; m_Repaint?.Invoke(); },
+                () => AssetDatabase.Refresh(),
+                resolvedKeys =>
+                {
+                    m_Restoring = false;
+                    foreach (var k in resolvedKeys) m_SelectedForRestore.Remove(k); // leave unresolved files checked to retry
+                    m_Repaint?.Invoke();
                 });
-        }
-
-        private void HandleRestoreResult(SvnRestoreResult res, int revision, string projectRel, string fileLabel)
-        {
-            m_Restoring = false;
-            if (res == null) { m_Notice = "Could not restore the file. Try again."; m_Repaint?.Invoke(); return; }
-            if (res.busy) { m_Notice = "Another SVN operation is running. Try again in a moment."; m_Repaint?.Invoke(); return; }
-            if (!string.IsNullOrEmpty(res.error)) { m_Notice = res.error; m_Repaint?.Invoke(); return; }
-
-            if (string.Equals(res.blocked, "readOnly", StringComparison.Ordinal))
-            {
-                EditorUtility.DisplayDialog("Can't restore yet", res.blockedAction, "OK");
-                m_Notice = null; m_Repaint?.Invoke();
-                return;
-            }
-            if (string.Equals(res.blocked, "localChanges", StringComparison.Ordinal))
-            {
-                if (EditorUtility.DisplayDialog("Replace your current changes?",
-                        res.blockedAction + "\n\nRestore and keep a backup of your current version?",
-                        "Restore and back up", "Cancel"))
-                {
-                    DoRestore(revision, projectRel, fileLabel, overwrite: true);
-                }
-                else { m_Notice = null; m_Repaint?.Invoke(); }
-                return;
-            }
-            if (res.restored)
-            {
-                if (!res.changed)
-                {
-                    m_Notice = $"{fileLabel} already matches r{revision} — nothing to change.";
-                }
-                else
-                {
-                    AssetDatabase.Refresh();
-                    m_Notice = string.IsNullOrEmpty(res.snapshotPath)
-                        ? $"Restored {fileLabel} to r{revision}. Review it in the Changes tab, then commit to keep the change."
-                        : $"Restored {fileLabel} to r{revision}. Your previous version was backed up next to it as {System.IO.Path.GetFileName(res.snapshotPath)}.";
-                }
-                m_Repaint?.Invoke();
-                return;
-            }
-            // Undocumented variant (restored:false with no blocked value): never leave the notice stuck.
-            m_Notice = "Could not restore the file. Try again.";
-            m_Repaint?.Invoke();
         }
 
         private static string ActionGlyph(string action)

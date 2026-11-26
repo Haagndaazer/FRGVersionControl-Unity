@@ -1013,6 +1013,49 @@ namespace FRGVersionControl.Core.Svn
                                                               CancellationToken ct = default)
             => Task.Run(() => { ct.ThrowIfCancellationRequested(); return ExportRevisionToTemp(path, revision); }, ct);
 
+        // Restore one file to the content it had at `revision` (mutate.restoreRevision). The first call
+        // omits overwriteLocalChanges; if the file has uncommitted edits the core returns
+        // blocked=="localChanges" without writing, and the caller re-calls with overwriteLocalChanges:true
+        // after confirming. A read-only (needs-lock) file returns blocked=="readOnly".
+        public static SvnRestoreResult RestoreRevision(string path, int revision, bool overwriteLocalChanges)
+        {
+            try
+            {
+                var client = FRGVersionControl.Core.FileLockManager.Instance.IpcClient;
+                if (!client.IsAvailable)
+                    return new SvnRestoreResult { error = "svn-core is not available. Reinstall the FRG Version Control package." };
+                var ctx = client.BuildDefaultContext();
+                var args = $"{{\"path\":\"{IpcEscape(path)}\",\"revision\":{revision}";
+                if (overwriteLocalChanges) args += ",\"overwriteLocalChanges\":true";
+                args += "}";
+                var result = client.InvokeRawAsync("mutate.restoreRevision", args, ctx).GetAwaiter().GetResult();
+                if (result.Busy || result.StillRunning) return new SvnRestoreResult { busy = true };
+                if (!result.Ok)
+                {
+                    string action = !string.IsNullOrEmpty(result.ErrorDefaultAction) ? result.ErrorDefaultAction : "Refresh, then try again.";
+                    return new SvnRestoreResult { error = action };
+                }
+                var raw = result.RawLine;
+                return new SvnRestoreResult
+                {
+                    restored = FRGVersionControl.Core.IpcClient.IpcJson.ReadScalar(raw, "restored", inResult: true) == "true",
+                    changed = FRGVersionControl.Core.IpcClient.IpcJson.ReadScalar(raw, "changed", inResult: true) == "true",
+                    blocked = FRGVersionControl.Core.IpcClient.IpcJson.ReadScalar(raw, "blocked", inResult: true),
+                    blockedAction = FRGVersionControl.Core.IpcClient.IpcJson.ReadScalar(raw, "blockedAction", inResult: true),
+                    snapshotPath = FRGVersionControl.Core.IpcClient.IpcJson.ReadScalar(raw, "snapshotPath", inResult: true),
+                };
+            }
+            catch (Exception ex)
+            {
+                Debug.LogWarning($"[SvnCommandRunner] IPC mutate.restoreRevision failed: {ex.Message}");
+                return new SvnRestoreResult { error = $"Could not restore the file ({ex.Message}). Try again." };
+            }
+        }
+
+        public static Task<SvnRestoreResult> RestoreRevisionAsync(string path, int revision, bool overwriteLocalChanges,
+                                                                  CancellationToken ct = default)
+            => Task.Run(() => { ct.ThrowIfCancellationRequested(); return RestoreRevision(path, revision, overwriteLocalChanges); }, ct);
+
         // ====================================================================
         // Local file hashing (no svn invocation)
         // ====================================================================
@@ -1566,5 +1609,22 @@ namespace FRGVersionControl.Core.Svn
         public bool hasMore;
         public bool busy;
         public string error;
+    }
+
+    /// <summary>Result of mutate.restoreRevision. On success <see cref="restored"/> is true and
+    /// <see cref="changed"/> says whether the file was actually rewritten (false = already matched);
+    /// <see cref="snapshotPath"/> is set only when a pre-restore backup was written. When the core
+    /// declined without writing, <see cref="blocked"/> is "readOnly" or "localChanges" and
+    /// <see cref="blockedAction"/> is the one-line reason to show. <see cref="busy"/> / <see cref="error"/>
+    /// mirror the other IPC wrappers (another op in flight / a user-facing failure sentence).</summary>
+    public class SvnRestoreResult
+    {
+        public bool restored;
+        public bool changed;
+        public string blocked;        // null, "readOnly", or "localChanges"
+        public string blockedAction;  // the sentence to show when blocked
+        public string snapshotPath;   // set only when a .pre-restore~ backup was written
+        public bool busy;
+        public string error;          // user-facing failure sentence (null on success/blocked)
     }
 }
